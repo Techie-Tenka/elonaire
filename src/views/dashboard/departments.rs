@@ -20,24 +20,15 @@ use detaxine_ui::{
 use icondata::BsPlusLg;
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
-use leptos::task::spawn_local;
 use leptos::wasm_bindgen::JsCast;
 use leptos_meta::*;
 use leptos_router::components::{A, Outlet};
-use reactive_stores::Store;
 use web_sys::HtmlFormElement;
 
-use crate::data::context::shared::{fetch_departments, fetch_organizations};
-use crate::data::models::graphql::acl::{
-    CreateDepartmentResponse, CreateDepartmentVars, DepartmentInput, DepartmentMetadata,
-};
 use crate::data::{
-    context::store::{AppStateContext, AppStateContextStoreFields},
-    models::general::acl::{AuthInfoStoreFields, UserInfoStoreFields},
+    context::acl::use_acl,
+    models::graphql::acl::{DepartmentInput, DepartmentMetadata},
 };
-use crate::utils::graphql_client::perform_mutation_or_query_with_vars;
-
-const ACL_SERVICE_API: Option<&str> = option_env!("ACL_SERVICE_API");
 
 #[component]
 pub fn Departments() -> impl IntoView {
@@ -51,9 +42,8 @@ pub fn Departments() -> impl IntoView {
 
 #[component]
 pub fn DepartmentsList() -> impl IntoView {
-    let store = expect_context::<Store<AppStateContext>>();
-    let departments = move || store.departments();
-    let (is_loading, set_is_loading) = signal(false);
+    let acl_ctx = use_acl();
+    let departments = move || acl_ctx.departments;
 
     let table_data = RwSignal::new((
         vec![
@@ -70,8 +60,6 @@ pub fn DepartmentsList() -> impl IntoView {
             .map(|department| {
                 let mut hash_map_data = HashMap::new();
 
-                // This id is the unique identifier of the table row. and is a MUST for the table to function properly.
-                // *Note:* The id is a MUST for the table to function properly. You might be forced to generate a unique id for each row if your data does not have a unique identifier.
                 hash_map_data.insert(
                     "id".to_string(),
                     TableCellData::String(
@@ -82,7 +70,6 @@ pub fn DepartmentsList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Name".to_string(),
                     TableCellData::String(
@@ -93,7 +80,6 @@ pub fn DepartmentsList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Date of Creation".to_string(),
                     TableCellData::DateTime(
@@ -113,22 +99,8 @@ pub fn DepartmentsList() -> impl IntoView {
         });
     });
 
-    Effect::new(move || {
-        set_is_loading.set(true);
-        spawn_local(async move {
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
-
-            let _fetch_departments_res = fetch_departments(&store, Some(&headers)).await;
-
-            set_is_loading.set(false);
-        });
+    Effect::new(move |_| {
+        acl_ctx.fetch_departments();
     });
 
     view! {
@@ -137,7 +109,7 @@ pub fn DepartmentsList() -> impl IntoView {
             <div class="display-constraints">
                 <Breadcrumbs custom_route_names=["Home", "Dashboard", "Departments"] />
             </div>
-            <Show when=move || is_loading.get()>
+            <Show when=move || acl_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 
@@ -170,130 +142,61 @@ pub fn CreateDepartment() -> impl IntoView {
     let (metadata_form_is_valid, set_metadata_form_is_valid) = signal(false);
     let submit_is_disabled =
         Memo::new(move |_| !main_form_is_valid.get() || !metadata_form_is_valid.get());
-    let store = expect_context::<Store<AppStateContext>>();
-    let departments = move || store.departments();
-    let organizations = move || store.organizations();
+    let acl_ctx = use_acl();
+    let departments = move || acl_ctx.departments;
+    let organizations = move || acl_ctx.organizations;
     let success_modal_is_open = RwSignal::new(false);
     let confirm_modal_is_open = RwSignal::new(false);
-    let (is_loading, set_is_loading) = signal(false);
     let departments_options = RwSignal::new(vec![] as Vec<SelectOption>);
     let organizations_options = RwSignal::new(vec![] as Vec<SelectOption>);
 
-    let onprimary_handler = Callback::new(move |_| {
-        if metadata_form_is_valid.get() && main_form_is_valid.get() {
-            set_is_loading.set(true);
-            spawn_local(async move {
-                let deserialized_main_form_data = deserialize_form_with_options::<DepartmentInput>(
-                    &form_ref,
-                    &Default::default(),
-                );
-                let deserialized_metadata_form_data = deserialize_form_with_options::<
-                    DepartmentMetadata,
-                >(
-                    &metadata_form_ref, &Default::default()
-                );
-
-                if deserialized_main_form_data.is_none()
-                    || deserialized_metadata_form_data.is_none()
+    Effect::new(move |prev: Option<u64>| {
+        let dirty = acl_ctx.department_created_dirty.get();
+        if let Some(prev) = prev {
+            if dirty != prev {
+                if let Some(form) = form_ref
+                    .get_untracked()
+                    .and_then(|el: HtmlFormElement| el.dyn_into::<HtmlFormElement>().ok())
                 {
-                    set_is_loading.set(false);
-                    return;
+                    form.reset();
+                    set_main_form_is_valid.set(false);
                 }
-
-                let deserialized_main_form_data = deserialized_main_form_data.unwrap();
-                let deserialized_metadata_form_data = deserialized_metadata_form_data.unwrap();
-
-                let input_vars = CreateDepartmentVars {
-                    department_input: deserialized_main_form_data,
-                    department_metadata: deserialized_metadata_form_data,
-                };
-
-                let query = r#"
-                       mutation CreateDepartment($departmentInput: DepartmentInput!, $departmentMetadata: DepartmentMetadata!) {
-                            createDepartment(departmentInput: $departmentInput, departmentMetadata: $departmentMetadata) {
-                                data {
-                                    depName
-                                    createdAt
-                                    updatedAt
-                                    id
-                                    createdBy
-                                }
-                                metadata {
-                                    newAccessToken
-                                    requestId
-                                }
-                            }
-                       }
-                   "#;
-
-                let mut headers = HashMap::new() as HashMap<String, String>;
-                headers.insert(
-                    "Authorization".into(),
-                    format!(
-                        "Bearer {}",
-                        store.user().auth_info().token().get_untracked()
-                    ),
-                );
-
-                let Some(acl_service_api) = ACL_SERVICE_API else {
-                    return;
-                };
-
-                let response = perform_mutation_or_query_with_vars::<
-                    CreateDepartmentResponse,
-                    CreateDepartmentVars,
-                >(Some(&headers), acl_service_api, query, input_vars)
-                .await;
-
-                match response.get_data() {
-                    Some(_data) => {
-                        if let Some(form) = form_ref
-                            .get_untracked()
-                            .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
-                        {
-                            form.reset();
-                            set_main_form_is_valid.set(false);
-                        } else {
-                        }
-
-                        if let Some(form) = metadata_form_ref
-                            .get_untracked()
-                            .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
-                        {
-                            form.reset();
-                            set_main_form_is_valid.set(false);
-                        } else {
-                        }
-
-                        set_is_loading.set(false);
-
-                        success_modal_is_open.update(|status| *status = true);
-                    }
-                    None => {
-                        set_is_loading.set(false);
-                    }
-                };
-            });
+                if let Some(form) = metadata_form_ref
+                    .get_untracked()
+                    .and_then(|el: HtmlFormElement| el.dyn_into::<HtmlFormElement>().ok())
+                {
+                    form.reset();
+                    set_metadata_form_is_valid.set(false);
+                }
+                success_modal_is_open.set(true);
+            }
         }
+        dirty
     });
 
-    Effect::new(move || {
-        spawn_local(async move {
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
+    let onprimary_handler = Callback::new(move |_| {
+        if !(metadata_form_is_valid.get() && main_form_is_valid.get()) {
+            return;
+        }
 
-            let _fetch_orgs = fetch_organizations(&store, Some(&headers)).await;
+        let Some(department_input) =
+            deserialize_form_with_options::<DepartmentInput>(&form_ref, &Default::default())
+        else {
+            return;
+        };
+        let Some(department_metadata) = deserialize_form_with_options::<DepartmentMetadata>(
+            &metadata_form_ref,
+            &Default::default(),
+        ) else {
+            return;
+        };
 
-            let _fetch_departments_res = fetch_departments(&store, Some(&headers)).await;
+        acl_ctx.create_department(department_input, department_metadata);
+    });
 
-            set_is_loading.set(false);
-        });
+    Effect::new(move |_| {
+        acl_ctx.fetch_organizations();
+        acl_ctx.fetch_departments();
     });
 
     Effect::new(move || {
@@ -330,13 +233,10 @@ pub fn CreateDepartment() -> impl IntoView {
     let handle_metadata_form_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         ev.stop_propagation();
-
-        // Implement logic to show form validity
-        let target = ev
+        if let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
-
-        if let Some(form) = target {
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        {
             set_metadata_form_is_valid.set(form.check_validity());
         }
     };
@@ -344,16 +244,12 @@ pub fn CreateDepartment() -> impl IntoView {
     let handle_main_form_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         ev.stop_propagation();
-
-        // Implement logic to show form validity
-        let target = ev
+        if let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
-
-        if let Some(form) = target {
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        {
             set_main_form_is_valid.set(form.check_validity());
-
-            if let Some(_submitter) = ev.submitter() {
+            if ev.submitter().is_some() {
                 confirm_modal_is_open.update(|status| *status = true);
             }
         }
@@ -372,7 +268,7 @@ pub fn CreateDepartment() -> impl IntoView {
                     <p>"Are you sure that you want to submit?"</p>
                 </div>
             </BasicModal>
-            <Show when=move || is_loading.get()>
+            <Show when=move || acl_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 
@@ -385,20 +281,8 @@ pub fn CreateDepartment() -> impl IntoView {
             <h2 class="display-constraints">Department Metadata</h2>
             <ReactiveForm on:submit=handle_metadata_form_submit form_ref=metadata_form_ref>
                 <div class="display-constraints flex flex-col gap-[20px]">
-                <SelectInput
-                label="Organization"
-                name="organization_id"
-                id_attr="organization_id"
-                placeholder="Select Organization"
-                options=organizations_options
-                />
-                <SelectInput
-                label="Department"
-                name="department_id"
-                id_attr="department_id"
-                placeholder="Select Department"
-                options=departments_options
-                />
+                <SelectInput label="Organization" name="organization_id" id_attr="organization_id" placeholder="Select Organization" options=organizations_options />
+                <SelectInput label="Department" name="department_id" id_attr="department_id" placeholder="Select Department" options=departments_options />
                 </div>
             </ReactiveForm>
 
@@ -406,13 +290,7 @@ pub fn CreateDepartment() -> impl IntoView {
             <ReactiveForm on:submit=handle_main_form_submit form_ref=form_ref>
                 <div class="display-constraints flex flex-col gap-[20px]">
                     <InputField field_type=InputFieldType::Text label="Department Name" required=true id_attr="dep_name" name="dep_name" />
-
-                    <BasicButton
-                        button_text="Submit"
-                        style_ext="bg-primary text-contrast-white"
-                        button_type=ButtonType::Submit
-                        disabled=submit_is_disabled
-                    />
+                    <BasicButton button_text="Submit" style_ext="bg-primary text-contrast-white" button_type=ButtonType::Submit disabled=submit_is_disabled />
                 </div>
             </ReactiveForm>
         </>

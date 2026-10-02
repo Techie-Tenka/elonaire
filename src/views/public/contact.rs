@@ -16,100 +16,65 @@ use leptos::prelude::*;
 use leptos::wasm_bindgen::JsCast;
 use leptos_icons::Icon;
 use leptos_router::components::A;
-use wasm_bindgen_futures::spawn_local;
 use web_sys::{HtmlFormElement, SubmitEvent};
 
-use crate::data::models::graphql::shared::{
-    MessageInput, SendMessageResponse, SendMessageVars, Subject,
-};
+use crate::data::context::{shared::use_shared, ui::UiContext};
+use crate::data::models::graphql::shared::{MessageInput, Subject};
 use crate::utils::custom_traits::EnumerableEnum;
-use crate::utils::graphql_client::perform_mutation_or_query_with_vars;
-
-const SHARED_SERVICE_API: Option<&str> = option_env!("SHARED_SERVICE_API");
 
 #[component]
 pub fn Contact() -> impl IntoView {
+    let ui = expect_context::<UiContext>();
+    let shared = use_shared();
+
     let contact_form_ref = NodeRef::new();
     let (form_is_valid, set_form_is_valid) = signal(false);
-    let (is_loading, set_is_loading) = signal(false);
     let success_modal_is_open = RwSignal::new(false);
-    let submit_disabled = Memo::new(move |_| !form_is_valid.get());
+    let submit_disabled = Memo::new(move |_| !form_is_valid.get() || shared.is_loading.get());
 
     let handle_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         ev.stop_propagation();
 
-        let target = ev
+        let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        else {
+            return;
+        };
 
-        if let Some(form) = target {
-            set_form_is_valid.set(form.check_validity());
+        let valid = form.check_validity();
+        set_form_is_valid.set(valid);
 
-            if ev.submitter().is_some() && form_is_valid.get() {
-                set_is_loading.set(true);
-                spawn_local(async move {
-                    let Some(message) = deserialize_form_with_options::<MessageInput>(
-                        &contact_form_ref,
-                        &Default::default(),
-                    ) else {
-                        set_is_loading.set(false);
-                        return;
-                    };
-
-                    // TODO: wire up your send_message mutation/request here
-                    let input_vars = SendMessageVars { message };
-
-                    let query = r#"
-                        mutation SendMessage($message: MessageInput!) {
-                            sendMessage(message: $message) {
-                                data {
-                                    subject
-                                    body
-                                    senderName
-                                    senderEmail
-                                    createdAt
-                                    id
-                                }
-                                metadata {
-                                    requestId
-                                    newAccessToken
-                                }
-                            }
-                        }
-                    "#;
-
-                    let Some(shared_service_api) = SHARED_SERVICE_API else {
-                        return;
-                    };
-
-                    let response = perform_mutation_or_query_with_vars::<
-                        SendMessageResponse,
-                        SendMessageVars,
-                    >(
-                        None, shared_service_api, query, input_vars
-                    )
-                    .await;
-
-                    match response.get_data() {
-                        Some(_data) => {
-                            if let Some(form_el) = contact_form_ref
-                                .get_untracked()
-                                .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
-                            {
-                                form_el.reset();
-                                set_form_is_valid.set(false);
-                            }
-                            set_is_loading.set(false);
-                            success_modal_is_open.update(|v| *v = true);
-                        }
-                        None => {
-                            set_is_loading.set(false);
-                        }
-                    }
-                });
-            }
+        if ev.submitter().is_none() || !valid {
+            return;
         }
+
+        let Some(message) =
+            deserialize_form_with_options::<MessageInput>(&contact_form_ref, &Default::default())
+        else {
+            ui.set_client_error("Could not read the contact form. Please try again.");
+            return;
+        };
+
+        let form_ref = contact_form_ref;
+        shared.send_message(
+            message,
+            Callback::new(move |success: bool| {
+                if !success {
+                    return;
+                }
+
+                if let Some(form_el) = form_ref
+                    .get_untracked()
+                    .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
+                {
+                    form_el.reset();
+                    set_form_is_valid.set(false);
+                }
+                success_modal_is_open.set(true);
+            }),
+        );
     };
 
     let subject_options = RwSignal::new(
@@ -222,7 +187,6 @@ pub fn Contact() -> impl IntoView {
                                         style_ext="bg-primary text-contrast-white hover:bg-secondary"
                                         button_type=ButtonType::Submit
                                         disabled=submit_disabled
-                                        // is_loading=is_loading
                                         icon=Some(BsSend)
                                     />
                                 </div>

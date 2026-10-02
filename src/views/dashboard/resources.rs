@@ -20,24 +20,13 @@ use detaxine_ui::{
 use icondata::BsPlusLg;
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
-use leptos::task::spawn_local;
 use leptos::wasm_bindgen::JsCast;
 use leptos_meta::*;
 use leptos_router::components::{A, Outlet};
-use reactive_stores::Store;
 use web_sys::HtmlFormElement;
 
-use crate::data::context::shared::{fetch_departments, fetch_organizations, fetch_resources};
-use crate::data::models::graphql::acl::{
-    CreateResourceResponse, CreateResourceVars, ResourceInput, ResourceMetadata,
-};
-use crate::data::{
-    context::store::{AppStateContext, AppStateContextStoreFields},
-    models::general::acl::{AuthInfoStoreFields, UserInfoStoreFields},
-};
-use crate::utils::graphql_client::perform_mutation_or_query_with_vars;
-
-const ACL_SERVICE_API: Option<&str> = option_env!("ACL_SERVICE_API");
+use crate::data::context::acl::use_acl;
+use crate::data::models::graphql::acl::{ResourceInput, ResourceMetadata};
 
 #[component]
 pub fn Resources() -> impl IntoView {
@@ -51,9 +40,8 @@ pub fn Resources() -> impl IntoView {
 
 #[component]
 pub fn ResourcesList() -> impl IntoView {
-    let store = expect_context::<Store<AppStateContext>>();
-    let resources = move || store.resources();
-    let (is_loading, set_is_loading) = signal(false);
+    let acl_ctx = use_acl();
+    let resources = move || acl_ctx.resources;
 
     let table_data = RwSignal::new((
         vec![
@@ -63,22 +51,8 @@ pub fn ResourcesList() -> impl IntoView {
         vec![],
     ));
 
-    Effect::new(move || {
-        set_is_loading.set(true);
-        spawn_local(async move {
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
-
-            let _fetch_resources_res = fetch_resources(&store, Some(&headers)).await;
-
-            set_is_loading.set(false);
-        });
+    Effect::new(move |_| {
+        acl_ctx.fetch_resources();
     });
 
     Effect::new(move || {
@@ -88,8 +62,6 @@ pub fn ResourcesList() -> impl IntoView {
             .map(|resource| {
                 let mut hash_map_data = HashMap::new();
 
-                // This id is the unique identifier of the table row. and is a MUST for the table to function properly.
-                // *Note:* The id is a MUST for the table to function properly. You might be forced to generate a unique id for each row if your data does not have a unique identifier.
                 hash_map_data.insert(
                     "id".to_string(),
                     TableCellData::String(
@@ -100,7 +72,6 @@ pub fn ResourcesList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Resource Name".to_string(),
                     TableCellData::String(
@@ -111,7 +82,6 @@ pub fn ResourcesList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Date of Creation".to_string(),
                     TableCellData::DateTime(
@@ -137,7 +107,7 @@ pub fn ResourcesList() -> impl IntoView {
             <div class="display-constraints">
                 <Breadcrumbs custom_route_names=["Home", "Dashboard", "Resources"] />
             </div>
-            <Show when=move || is_loading.get()>
+            <Show when=move || acl_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 
@@ -170,165 +140,101 @@ pub fn CreateResource() -> impl IntoView {
     let (metadata_form_is_valid, set_metadata_form_is_valid) = signal(false);
     let submit_is_disabled =
         Memo::new(move |_| !main_form_is_valid.get() || !metadata_form_is_valid.get());
-    let store = expect_context::<Store<AppStateContext>>();
-    let organizations = move || store.organizations();
-    let departments = move || store.departments();
+    let acl_ctx = use_acl();
+    let organizations = move || acl_ctx.organizations;
+    let departments = move || acl_ctx.departments;
     let success_modal_is_open = RwSignal::new(false);
     let confirm_modal_is_open = RwSignal::new(false);
-    let (is_loading, set_is_loading) = signal(false);
     let departments_options = RwSignal::new(vec![] as Vec<SelectOption>);
     let organizations_options = RwSignal::new(vec![] as Vec<SelectOption>);
 
-    let onprimary_handler = Callback::new(move |_| {
-        if metadata_form_is_valid.get() && main_form_is_valid.get() {
-            set_is_loading.set(true);
-            spawn_local(async move {
-                let deserialized_main_form_data =
-                    deserialize_form_with_options::<ResourceInput>(&form_ref, &Default::default());
-                let deserialized_metadata_form_data = deserialize_form_with_options::<
-                    ResourceMetadata,
-                >(
-                    &metadata_form_ref, &Default::default()
-                );
-
-                if deserialized_main_form_data.is_none()
-                    || deserialized_metadata_form_data.is_none()
+    // React to successful creation.
+    Effect::new(move |prev: Option<u64>| {
+        let dirty = acl_ctx.resource_created_dirty.get();
+        if let Some(prev) = prev {
+            if dirty != prev {
+                if let Some(form) = form_ref
+                    .get_untracked()
+                    .and_then(|el: HtmlFormElement| el.dyn_into::<HtmlFormElement>().ok())
                 {
-                    set_is_loading.set(false);
-                    return;
+                    form.reset();
+                    set_main_form_is_valid.set(false);
                 }
-
-                let deserialized_main_form_data = deserialized_main_form_data.unwrap();
-                let deserialized_metadata_form_data = deserialized_metadata_form_data.unwrap();
-
-                let input_vars = CreateResourceVars {
-                    resource_input: deserialized_main_form_data,
-                    resource_metadata: deserialized_metadata_form_data,
-                };
-
-                let query = r#"
-                       mutation CreateResource($resourceInput: ResourceInput!, $resourceMetadata: ResourceMetadata!) {
-                            createResource(resourceInput: $resourceInput, resourceMetadata: $resourceMetadata) {
-                                data {
-                                    name
-                                    id
-                                    createdBy
-                                }
-                                metadata {
-                                    newAccessToken
-                                    requestId
-                                }
-                            }
-                       }
-                   "#;
-
-                let mut headers = HashMap::new() as HashMap<String, String>;
-                headers.insert(
-                    "Authorization".into(),
-                    format!(
-                        "Bearer {}",
-                        store.user().auth_info().token().get_untracked()
-                    ),
-                );
-
-                let Some(acl_service_api) = ACL_SERVICE_API else {
-                    return;
-                };
-
-                let response = perform_mutation_or_query_with_vars::<
-                    CreateResourceResponse,
-                    CreateResourceVars,
-                >(Some(&headers), acl_service_api, query, input_vars)
-                .await;
-
-                match response.get_data() {
-                    Some(_data) => {
-                        if let Some(form) = form_ref
-                            .get_untracked()
-                            .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
-                        {
-                            form.reset();
-                            set_main_form_is_valid.set(false);
-                        } else {
-                        }
-
-                        if let Some(form) = metadata_form_ref
-                            .get_untracked()
-                            .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
-                        {
-                            form.reset();
-                            set_main_form_is_valid.set(false);
-                        } else {
-                        }
-
-                        set_is_loading.set(false);
-
-                        success_modal_is_open.update(|status| *status = true);
-                    }
-                    None => {
-                        set_is_loading.set(false);
-                    }
-                };
-            });
+                if let Some(form) = metadata_form_ref
+                    .get_untracked()
+                    .and_then(|el: HtmlFormElement| el.dyn_into::<HtmlFormElement>().ok())
+                {
+                    form.reset();
+                    set_metadata_form_is_valid.set(false);
+                }
+                success_modal_is_open.set(true);
+            }
         }
+        dirty
     });
 
-    Effect::new(move || {
-        spawn_local(async move {
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
+    let onprimary_handler = Callback::new(move |_| {
+        if !(metadata_form_is_valid.get() && main_form_is_valid.get()) {
+            return;
+        }
 
-            let _fetch_organizations = fetch_organizations(&store, Some(&headers)).await;
-            let _fetch_departments = fetch_departments(&store, Some(&headers)).await;
+        let Some(resource_input) =
+            deserialize_form_with_options::<ResourceInput>(&form_ref, &Default::default())
+        else {
+            return;
+        };
+        let Some(resource_metadata) = deserialize_form_with_options::<ResourceMetadata>(
+            &metadata_form_ref,
+            &Default::default(),
+        ) else {
+            return;
+        };
 
-            set_is_loading.set(false);
-        });
+        acl_ctx.create_resource(resource_input, resource_metadata);
+    });
 
-        Effect::new(move || {
-            organizations_options.set(
-                organizations()
-                    .get()
-                    .iter()
-                    .map(|org| {
-                        SelectOption::new(
-                            org.id.as_ref().unwrap_or(&Default::default()),
-                            org.org_name.as_ref().unwrap_or(&Default::default()),
-                        )
-                    })
-                    .collect(),
-            );
+    // Kick off both fetches. `Effect::new` body runs once on mount.
+    Effect::new(move |_| {
+        acl_ctx.fetch_organizations();
+        acl_ctx.fetch_departments();
+    });
 
-            departments_options.set(
-                departments()
-                    .get()
-                    .iter()
-                    .map(|dep| {
-                        SelectOption::new(
-                            dep.id.as_ref().unwrap_or(&Default::default()),
-                            dep.dep_name.as_ref().unwrap_or(&Default::default()),
-                        )
-                    })
-                    .collect(),
-            );
-        });
+    // Derive the select options from the context signals.
+    Effect::new(move |_| {
+        organizations_options.set(
+            organizations()
+                .get()
+                .iter()
+                .map(|org| {
+                    SelectOption::new(
+                        org.id.as_ref().unwrap_or(&Default::default()),
+                        org.org_name.as_ref().unwrap_or(&Default::default()),
+                    )
+                })
+                .collect(),
+        );
+
+        departments_options.set(
+            departments()
+                .get()
+                .iter()
+                .map(|dep| {
+                    SelectOption::new(
+                        dep.id.as_ref().unwrap_or(&Default::default()),
+                        dep.dep_name.as_ref().unwrap_or(&Default::default()),
+                    )
+                })
+                .collect(),
+        );
     });
 
     let handle_metadata_form_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         ev.stop_propagation();
-
-        // Implement logic to show form validity
-        let target = ev
+        if let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
-
-        if let Some(form) = target {
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        {
             set_metadata_form_is_valid.set(form.check_validity());
         }
     };
@@ -336,16 +242,12 @@ pub fn CreateResource() -> impl IntoView {
     let handle_main_form_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         ev.stop_propagation();
-
-        // Implement logic to show form validity
-        let target = ev
+        if let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
-
-        if let Some(form) = target {
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        {
             set_main_form_is_valid.set(form.check_validity());
-
-            if let Some(_submitter) = ev.submitter() {
+            if ev.submitter().is_some() {
                 confirm_modal_is_open.update(|status| *status = true);
             }
         }
@@ -364,7 +266,7 @@ pub fn CreateResource() -> impl IntoView {
                     <p>"Are you sure that you want to submit?"</p>
                 </div>
             </BasicModal>
-            <Show when=move || is_loading.get()>
+            <Show when=move || acl_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 
@@ -377,20 +279,20 @@ pub fn CreateResource() -> impl IntoView {
             <h2 class="display-constraints">Resource Metadata</h2>
             <ReactiveForm on:submit=handle_metadata_form_submit form_ref=metadata_form_ref>
                 <div class="display-constraints flex flex-col gap-[20px]">
-                <SelectInput
-                label="Organization"
-                name="organization_id"
-                id_attr="organization_id"
-                placeholder="Select Organization"
-                options=organizations_options
-                />
-                <SelectInput
-                label="Department"
-                name="department_id"
-                id_attr="department_id"
-                placeholder="Select Department"
-                options=departments_options
-                />
+                    <SelectInput
+                        label="Organization"
+                        name="organization_id"
+                        id_attr="organization_id"
+                        placeholder="Select Organization"
+                        options=organizations_options
+                    />
+                    <SelectInput
+                        label="Department"
+                        name="department_id"
+                        id_attr="department_id"
+                        placeholder="Select Department"
+                        options=departments_options
+                    />
                 </div>
             </ReactiveForm>
 

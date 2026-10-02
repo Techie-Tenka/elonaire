@@ -21,26 +21,17 @@ use detaxine_ui::{
 use icondata::{BsPlusLg, TbAwardOffOutline};
 use leptos::ev::{self, SubmitEvent};
 use leptos::prelude::*;
-use leptos::task::spawn_local;
 use leptos::wasm_bindgen::JsCast;
 use leptos_icons::Icon;
 use leptos_meta::*;
 use leptos_router::components::{A, Outlet};
-use reactive_stores::Store;
 use web_sys::{HtmlFormElement, HtmlInputElement};
 
-use crate::data::context::shared::fetch_resume;
-use crate::data::models::graphql::shared::{
-    CreateResumeItemResponse, ResumeItemInputVars, UserResumeInput, UserResumeSection,
-};
 use crate::data::{
-    context::store::{AppStateContext, AppStateContextStoreFields},
-    models::general::acl::{AuthInfoStoreFields, UserInfoStoreFields},
+    context::portfolio::use_portfolio,
+    models::graphql::shared::{UserResumeInput, UserResumeSection},
 };
 use crate::utils::custom_traits::EnumerableEnum;
-use crate::utils::graphql_client::perform_mutation_or_query_with_vars;
-
-const SHARED_SERVICE_API: Option<&str> = option_env!("SHARED_SERVICE_API");
 
 #[component]
 pub fn Resume() -> impl IntoView {
@@ -54,9 +45,8 @@ pub fn Resume() -> impl IntoView {
 
 #[component]
 pub fn ResumeItemsList() -> impl IntoView {
-    let store = expect_context::<Store<AppStateContext>>();
-    let resume = move || store.resume();
-    let (is_loading, set_is_loading) = signal(false);
+    let portfolio_ctx = use_portfolio();
+    let resume = move || portfolio_ctx.resume;
 
     let table_data = RwSignal::new((
         vec![
@@ -68,22 +58,23 @@ pub fn ResumeItemsList() -> impl IntoView {
         vec![],
     ));
 
+    Effect::new(move |_| {
+        portfolio_ctx.fetch_resume();
+    });
+
     Effect::new(move || {
-        let resume: Vec<HashMap<String, TableCellData>> = resume()
+        let resume_rows: Vec<HashMap<String, TableCellData>> = resume()
             .get()
             .iter()
             .map(|resume| {
                 let mut hash_map_data = HashMap::new();
 
-                // This id is the unique identifier of the table row. and is a MUST for the table to function properly.
-                // *Note:* The id is a MUST for the table to function properly. You might be forced to generate a unique id for each row if your data does not have a unique identifier.
                 hash_map_data.insert(
                     "id".to_string(),
                     TableCellData::String(
                         resume.id.as_ref().unwrap_or(&Default::default()).to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Title".to_string(),
                     TableCellData::String(
@@ -94,7 +85,6 @@ pub fn ResumeItemsList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "YOE".to_string(),
                     TableCellData::Usize(
@@ -105,7 +95,6 @@ pub fn ResumeItemsList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Start Date".to_string(),
                     TableCellData::DateTime(
@@ -116,7 +105,6 @@ pub fn ResumeItemsList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Section".to_string(),
                     TableCellData::String(format!(
@@ -133,25 +121,7 @@ pub fn ResumeItemsList() -> impl IntoView {
             .collect();
 
         table_data.update(move |prev| {
-            prev.1 = resume;
-        });
-    });
-
-    Effect::new(move || {
-        set_is_loading.set(true);
-        spawn_local(async move {
-            // let mut headers = HashMap::new() as HashMap<String, String>;
-            // headers.insert(
-            //     "Authorization".into(),
-            //     format!(
-            //         "Bearer {}",
-            //         store.user().auth_info().token().get_untracked()
-            //     ),
-            // );
-
-            let _fetch_resume_res = fetch_resume(&store, None).await;
-
-            set_is_loading.set(false);
+            prev.1 = resume_rows;
         });
     });
 
@@ -161,7 +131,7 @@ pub fn ResumeItemsList() -> impl IntoView {
             <div class="display-constraints">
                 <Breadcrumbs custom_route_names=["Home", "Dashboard", "Resume Items"] />
             </div>
-            <Show when=move || is_loading.get()>
+            <Show when=move || portfolio_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 
@@ -195,10 +165,9 @@ pub fn CreateResumeItem() -> impl IntoView {
     let (form_is_valid, set_form_is_valid) = signal(false);
     let submit_is_disabled =
         Memo::new(move |_| !form_is_valid.get() || achievements.get().len() == 0);
-    let store = expect_context::<Store<AppStateContext>>();
+    let portfolio_ctx = use_portfolio();
     let success_modal_is_open = RwSignal::new(false);
     let confirm_modal_is_open = RwSignal::new(false);
-    let (is_loading, set_is_loading) = signal(false);
 
     let resume_sections = RwSignal::new(
         UserResumeSection::variants_slice()
@@ -207,122 +176,62 @@ pub fn CreateResumeItem() -> impl IntoView {
             .collect::<Vec<SelectOption>>(),
     );
 
-    let onprimary_handler = Callback::new(move |_| {
-        if form_is_valid.get() {
-            set_is_loading.set(true);
-            spawn_local(async move {
-                let deserialized_form_data = deserialize_form_with_options::<UserResumeInput>(
-                    &form_ref,
-                    &FormDeserializeOptions {
-                        deserialize_bool: true,
-                        ..Default::default()
-                    },
-                );
-
-                if deserialized_form_data.is_none() {
-                    set_is_loading.set(false);
-                    return;
+    // React to successful creation.
+    Effect::new(move |prev: Option<u64>| {
+        let dirty = portfolio_ctx.resume_item_created_dirty.get();
+        if let Some(prev) = prev {
+            if dirty != prev {
+                if let Some(form) = form_ref
+                    .get_untracked()
+                    .and_then(|el: HtmlFormElement| el.dyn_into::<HtmlFormElement>().ok())
+                {
+                    form.reset();
+                    set_form_is_valid.set(false);
                 }
-
-                let deserialized_form_data = deserialized_form_data.unwrap();
-
-                let input_vars = ResumeItemInputVars {
-                    resume_item: deserialized_form_data,
-                    achievements: achievements.get_untracked(),
-                };
-
-                let query = r#"
-                       mutation CreateResumeItem($resumeItem: UserResumeInput!, $achievements: [String!]!) {
-                            createResumeItem(resumeItem: $resumeItem, achievements: $achievements) {
-                                data {
-                                    title
-                                    moreInfo
-                                    startDate
-                                    endDate
-                                    link
-                                    section
-                                    id
-                                    yearsOfExperience
-                                }
-                                metadata {
-                                    newAccessToken
-                                    requestId
-                                }
-                            }
-                       }
-                   "#;
-
-                let mut headers = HashMap::new() as HashMap<String, String>;
-                headers.insert(
-                    "Authorization".into(),
-                    format!(
-                        "Bearer {}",
-                        store.user().auth_info().token().get_untracked()
-                    ),
-                );
-
-                let Some(shared_service_api) = SHARED_SERVICE_API else {
-                    return;
-                };
-
-                let response =
-                    perform_mutation_or_query_with_vars::<
-                        CreateResumeItemResponse,
-                        ResumeItemInputVars,
-                    >(Some(&headers), shared_service_api, query, input_vars)
-                    .await;
-
-                match response.get_data() {
-                    Some(_data) => {
-                        if let Some(form) = form_ref
-                            .get_untracked()
-                            .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
-                        {
-                            form.reset();
-                            set_form_is_valid.set(false);
-                        } else {
-                        }
-                        set_is_loading.set(false);
-
-                        success_modal_is_open.update(|status| *status = true);
-                        set_achievements.set(vec![]);
-                    }
-                    None => {
-                        set_is_loading.set(false);
-                    }
-                };
-            });
+                set_achievements.set(vec![]);
+                success_modal_is_open.set(true);
+            }
         }
+        dirty
     });
 
-    // let onreset_handler = Callback::new(move |_ev: ev::Event| {
-    //     init_date.set(None);
-    // });
+    let onprimary_handler = Callback::new(move |_| {
+        if !form_is_valid.get() {
+            return;
+        }
+
+        let Some(resume_item) = deserialize_form_with_options::<UserResumeInput>(
+            &form_ref,
+            &FormDeserializeOptions {
+                deserialize_bool: true,
+                ..Default::default()
+            },
+        ) else {
+            return;
+        };
+
+        portfolio_ctx.create_resume_item(resume_item, achievements.get_untracked());
+    });
 
     let handle_step_form_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         ev.stop_propagation();
-
-        // Implement logic to show form validity
-        let target = ev
+        if let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
-
-        if let Some(form) = target {
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        {
             set_form_is_valid.set(form.check_validity());
-
-            if let Some(_submitter) = ev.submitter() {
+            if ev.submitter().is_some() {
                 confirm_modal_is_open.update(|status| *status = true);
             }
         }
     };
 
     let handle_achievement_input_change = move |ev: ev::Event| {
-        let target = ev
+        if let Some(input_el) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlInputElement>().ok());
-
-        if let Some(input_el) = target {
+            .and_then(|t| t.dyn_into::<HtmlInputElement>().ok())
+        {
             set_achievement_field_value.set(input_el.value());
         }
     };
@@ -347,7 +256,7 @@ pub fn CreateResumeItem() -> impl IntoView {
                     <p>"Are you sure that you want to submit?"</p>
                 </div>
             </BasicModal>
-            <Show when=move || is_loading.get()>
+            <Show when=move || portfolio_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 
@@ -366,18 +275,18 @@ pub fn CreateResumeItem() -> impl IntoView {
                     <DatePicker label="End Date" id_attr="end_date" name="end_date" />
                     <InputField field_type=InputFieldType::Text label="Link" id_attr="link" name="link" />
                     <SelectInput
-                    label="Section"
-                    name="section"
-                    required=true
-                    id_attr="section"
-                    placeholder="Select Section"
-                    options=resume_sections
+                        label="Section"
+                        name="section"
+                        required=true
+                        id_attr="section"
+                        placeholder="Select Section"
+                        options=resume_sections
                     />
 
                     <div class="flex flex-col gap-[10px]">
                         <h3>Achievements<span class="text-danger">"*"</span></h3>
                         { move || if achievements.get().is_empty() {
-                            Some(view!{
+                            Some(view! {
                                 <div class="flex flex-col">
                                     <Icon icon=TbAwardOffOutline />
                                     <p class="text-sm">No achievements added yet.</p>
@@ -389,7 +298,7 @@ pub fn CreateResumeItem() -> impl IntoView {
                         }
                         <ul class="list-disc list-inside">
                             {
-                                move || achievements.get().iter().map(|achievement| view!{ <li>{achievement.to_owned()}</li> }).collect::<Vec<_>>()
+                                move || achievements.get().iter().map(|achievement| view! { <li>{achievement.to_owned()}</li> }).collect::<Vec<_>>()
                             }
                         </ul>
                         <div class="flex flex-row items-center">

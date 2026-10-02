@@ -7,25 +7,22 @@ use leptos_router::{
     components::{A, Outlet},
     hooks::use_location,
 };
-use reactive_stores::Store;
 
 use crate::{
     components::molecules::nav::Nav,
-    data::{
-        context::store::{AppStateContext, AppStateContextStoreFields},
-        models::general::acl::UserInfoStoreFields,
-    },
+    data::context::{auth::use_auth, ui::use_ui, user::use_user},
     views::{dashboard::layout::MenuItem, public::error_handler::ErrorHandler},
 };
 
 #[component]
 pub fn BlogLayout() -> impl IntoView {
-    let store = expect_context::<Store<AppStateContext>>();
-    let user_auth = store.user().auth_info();
-    let dark_mode_is_active = store.dark_mode_is_active();
+    let auth_ctx = use_auth();
+    let ui_ctx = use_ui();
+
+    let dark_mode_is_active = ui_ctx.dark_mode_is_active;
+
     // track collapsed state
     let (collapsed, set_collapsed) = signal(false);
-    let (is_loading, set_is_loading) = signal(false);
     let current_path = use_location().pathname;
 
     let handle_menu_click =
@@ -36,9 +33,6 @@ pub fn BlogLayout() -> impl IntoView {
             MenuItem::new("Home", AiHomeOutlined, "/", vec![]),
             MenuItem::new("Blog Feed", BsRss, "/blog", vec![]),
             MenuItem::new("About", BsInfoCircle, "/blog/about", vec![]),
-            // MenuItem::new("Categories", BsFilter, "/blog/categories"),
-            // MenuItem::new("Pricing", BsCashCoin, "/blog/pricing"),
-            // MenuItem::new("Contact", BiContactSolid, "/blog/contact"),
         ]
     });
 
@@ -103,9 +97,7 @@ pub fn BlogLayout() -> impl IntoView {
                                 </nav>
                                 {
                                     move || {
-                                        let is_authenticated = !user_auth.get().token.is_empty();
-
-                                        if !is_authenticated {
+                                        if !auth_ctx.is_authenticated().get() {
                                             Some(
                                                 view! {
                                                     <div class="md:hidden flex flex-col gap-[10px]">

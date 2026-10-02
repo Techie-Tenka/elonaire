@@ -2,23 +2,16 @@ use icondata::{BsGithub, BsLinkedin, BsTwitterX, MdiWeb};
 use leptos::prelude::*;
 use leptos_icons::Icon;
 use leptos_router::components::A;
-use reactive_stores::Store;
-use wasm_bindgen_futures::spawn_local;
 
-use crate::data::context::{
-    store::{AppStateContext, AppStateContextStoreFields},
-    users::fetch_site_owner_info,
-};
+use crate::data::context::site_owner::use_site_owner;
 
 #[component]
 pub fn About() -> impl IntoView {
-    let store = expect_context::<Store<AppStateContext>>();
-    let site_owner_info = move || store.site_owner_info();
+    let site_owner_ctx = use_site_owner();
+    let site_owner_info = move || site_owner_ctx.site_owner_info;
 
-    Effect::new(move || {
-        spawn_local(async move {
-            let _site_owner_info = fetch_site_owner_info(&store, None).await;
-        });
+    Effect::new(move |_| {
+        site_owner_ctx.fetch_site_owner_info();
     });
 
     view! {

@@ -19,24 +19,12 @@ use detaxine_ui::{
 use icondata::BsPlusLg;
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
-use leptos::task::spawn_local;
 use leptos::wasm_bindgen::JsCast;
 use leptos_meta::*;
 use leptos_router::components::{A, Outlet};
-use reactive_stores::Store;
 use web_sys::HtmlFormElement;
 
-use crate::data::context::shared::fetch_organizations;
-use crate::data::models::graphql::acl::{
-    CreateOrganizationResponse, CreateOrganizationVars, OrganizationInput,
-};
-use crate::data::{
-    context::store::{AppStateContext, AppStateContextStoreFields},
-    models::general::acl::{AuthInfoStoreFields, UserInfoStoreFields},
-};
-use crate::utils::graphql_client::perform_mutation_or_query_with_vars;
-
-const ACL_SERVICE_API: Option<&str> = option_env!("ACL_SERVICE_API");
+use crate::data::{context::acl::use_acl, models::graphql::acl::OrganizationInput};
 
 #[component]
 pub fn Organizations() -> impl IntoView {
@@ -50,9 +38,8 @@ pub fn Organizations() -> impl IntoView {
 
 #[component]
 pub fn OrganizationsList() -> impl IntoView {
-    let store = expect_context::<Store<AppStateContext>>();
-    let organizations = move || store.organizations();
-    let (is_loading, set_is_loading) = signal(false);
+    let acl_ctx = use_acl();
+    let organizations = move || acl_ctx.organizations;
 
     let table_data = RwSignal::new((
         vec![
@@ -62,22 +49,8 @@ pub fn OrganizationsList() -> impl IntoView {
         vec![],
     ));
 
-    Effect::new(move || {
-        set_is_loading.set(true);
-        spawn_local(async move {
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
-
-            let _fetch_orgs = fetch_organizations(&store, Some(&headers)).await;
-
-            set_is_loading.set(false);
-        });
+    Effect::new(move |_| {
+        acl_ctx.fetch_organizations();
     });
 
     Effect::new(move || {
@@ -87,8 +60,6 @@ pub fn OrganizationsList() -> impl IntoView {
             .map(|organization| {
                 let mut hash_map_data = HashMap::new();
 
-                // This id is the unique identifier of the table row. and is a MUST for the table to function properly.
-                // *Note:* The id is a MUST for the table to function properly. You might be forced to generate a unique id for each row if your data does not have a unique identifier.
                 hash_map_data.insert(
                     "id".to_string(),
                     TableCellData::String(
@@ -99,7 +70,6 @@ pub fn OrganizationsList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Name".to_string(),
                     TableCellData::String(
@@ -110,7 +80,6 @@ pub fn OrganizationsList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Date of Creation".to_string(),
                     TableCellData::DateTime(
@@ -136,7 +105,7 @@ pub fn OrganizationsList() -> impl IntoView {
             <div class="display-constraints">
                 <Breadcrumbs custom_route_names=["Home", "Dashboard", "Organizations"] />
             </div>
-            <Show when=move || is_loading.get()>
+            <Show when=move || acl_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 
@@ -166,104 +135,51 @@ pub fn CreateOrganization() -> impl IntoView {
     let form_ref = NodeRef::new();
     let (main_form_is_valid, set_main_form_is_valid) = signal(false);
     let submit_is_disabled = Memo::new(move |_| !main_form_is_valid.get());
-    let store = expect_context::<Store<AppStateContext>>();
+    let acl_ctx = use_acl();
     let success_modal_is_open = RwSignal::new(false);
     let confirm_modal_is_open = RwSignal::new(false);
-    let (is_loading, set_is_loading) = signal(false);
+
+    Effect::new(move |prev: Option<u64>| {
+        let dirty = acl_ctx.organization_created_dirty.get();
+        if let Some(prev) = prev {
+            if dirty != prev {
+                if let Some(form) = form_ref
+                    .get_untracked()
+                    .and_then(|el: HtmlFormElement| el.dyn_into::<HtmlFormElement>().ok())
+                {
+                    form.reset();
+                    set_main_form_is_valid.set(false);
+                }
+                success_modal_is_open.set(true);
+            }
+        }
+        dirty
+    });
 
     let onprimary_handler = Callback::new(move |_| {
-        if main_form_is_valid.get() {
-            set_is_loading.set(true);
-            spawn_local(async move {
-                let deserialized_main_form_data = deserialize_form_with_options::<OrganizationInput>(
-                    &form_ref,
-                    &FormDeserializeOptions::default(),
-                );
-
-                if deserialized_main_form_data.is_none() {
-                    set_is_loading.set(false);
-                    return;
-                }
-
-                let deserialized_main_form_data = deserialized_main_form_data.unwrap();
-
-                let input_vars = CreateOrganizationVars {
-                    organization_input: deserialized_main_form_data,
-                };
-
-                let query = r#"
-                       mutation CreateOrganization($organizationInput: OrganizationInput!) {
-                            createOrganization(organizationInput: $organizationInput) {
-                                data {
-                                    orgName
-                                    createdAt
-                                    updatedAt
-                                    id
-                                    createdBy
-                                }
-                                metadata {
-                                    newAccessToken
-                                    requestId
-                                }
-                            }
-                       }
-                   "#;
-
-                let mut headers = HashMap::new() as HashMap<String, String>;
-                headers.insert(
-                    "Authorization".into(),
-                    format!(
-                        "Bearer {}",
-                        store.user().auth_info().token().get_untracked()
-                    ),
-                );
-
-                let Some(acl_service_api) = ACL_SERVICE_API else {
-                    return;
-                };
-
-                let response = perform_mutation_or_query_with_vars::<
-                    CreateOrganizationResponse,
-                    CreateOrganizationVars,
-                >(Some(&headers), acl_service_api, query, input_vars)
-                .await;
-
-                match response.get_data() {
-                    Some(_data) => {
-                        if let Some(form) = form_ref
-                            .get_untracked()
-                            .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
-                        {
-                            form.reset();
-                            set_main_form_is_valid.set(false);
-                        } else {
-                        }
-
-                        set_is_loading.set(false);
-
-                        success_modal_is_open.update(|status| *status = true);
-                    }
-                    None => {
-                        set_is_loading.set(false);
-                    }
-                };
-            });
+        if !main_form_is_valid.get() {
+            return;
         }
+
+        let Some(organization_input) = deserialize_form_with_options::<OrganizationInput>(
+            &form_ref,
+            &FormDeserializeOptions::default(),
+        ) else {
+            return;
+        };
+
+        acl_ctx.create_organization(organization_input);
     });
 
     let handle_main_form_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         ev.stop_propagation();
-
-        // Implement logic to show form validity
-        let target = ev
+        if let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
-
-        if let Some(form) = target {
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        {
             set_main_form_is_valid.set(form.check_validity());
-
-            if let Some(_submitter) = ev.submitter() {
+            if ev.submitter().is_some() {
                 confirm_modal_is_open.update(|status| *status = true);
             }
         }
@@ -282,7 +198,7 @@ pub fn CreateOrganization() -> impl IntoView {
                     <p>"Are you sure that you want to submit?"</p>
                 </div>
             </BasicModal>
-            <Show when=move || is_loading.get()>
+            <Show when=move || acl_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 
@@ -295,13 +211,7 @@ pub fn CreateOrganization() -> impl IntoView {
             <ReactiveForm on:submit=handle_main_form_submit form_ref=form_ref>
                 <div class="display-constraints flex flex-col gap-[20px]">
                     <InputField field_type=InputFieldType::Text label="Organization Name" required=true id_attr="org_name" name="org_name" />
-
-                    <BasicButton
-                        button_text="Submit"
-                        style_ext="bg-primary text-contrast-white"
-                        button_type=ButtonType::Submit
-                        disabled=submit_is_disabled
-                    />
+                    <BasicButton button_text="Submit" style_ext="bg-primary text-contrast-white" button_type=ButtonType::Submit disabled=submit_is_disabled />
                 </div>
             </ReactiveForm>
         </>

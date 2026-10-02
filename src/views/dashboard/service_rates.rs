@@ -20,24 +20,15 @@ use detaxine_ui::{
 use icondata::BsPlusLg;
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
-use leptos::task::spawn_local;
 use leptos::wasm_bindgen::JsCast;
 use leptos_meta::*;
 use leptos_router::components::{A, Outlet};
-use reactive_stores::Store;
 use web_sys::HtmlFormElement;
 
-use crate::data::context::shared::{fetch_currencies, fetch_service_rates, fetch_services};
-use crate::data::models::graphql::shared::{
-    CreateServiceRateResponse, CreateServiceRateVars, ServiceRateInput, ServiceRateInputMetadata,
-};
 use crate::data::{
-    context::store::{AppStateContext, AppStateContextStoreFields},
-    models::general::acl::{AuthInfoStoreFields, UserInfoStoreFields},
+    context::{billing::use_billing, portfolio::use_portfolio},
+    models::graphql::shared::ServiceRateInput,
 };
-use crate::utils::graphql_client::perform_mutation_or_query_with_vars;
-
-const SHARED_SERVICE_API: Option<&str> = option_env!("SHARED_SERVICE_API");
 
 #[component]
 pub fn ServiceRates() -> impl IntoView {
@@ -51,9 +42,8 @@ pub fn ServiceRates() -> impl IntoView {
 
 #[component]
 pub fn ServiceRatesList() -> impl IntoView {
-    let store = expect_context::<Store<AppStateContext>>();
-    let service_rates = move || store.service_rates();
-    let (is_loading, set_is_loading) = signal(false);
+    let billing_ctx = use_billing();
+    let service_rates = move || billing_ctx.service_rates;
 
     let table_data = RwSignal::new((
         vec![
@@ -64,22 +54,8 @@ pub fn ServiceRatesList() -> impl IntoView {
         vec![],
     ));
 
-    Effect::new(move || {
-        set_is_loading.set(true);
-        spawn_local(async move {
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
-
-            let _response = fetch_service_rates(&store, Some(&headers)).await;
-
-            set_is_loading.set(false);
-        });
+    Effect::new(move |_| {
+        billing_ctx.fetch_service_rates();
     });
 
     Effect::new(move || {
@@ -89,8 +65,6 @@ pub fn ServiceRatesList() -> impl IntoView {
             .map(|service_rate| {
                 let mut hash_map_data = HashMap::new();
 
-                // This id is the unique identifier of the table row. and is a MUST for the table to function properly.
-                // *Note:* The id is a MUST for the table to function properly. You might be forced to generate a unique id for each row if your data does not have a unique identifier.
                 hash_map_data.insert(
                     "id".into(),
                     TableCellData::String(
@@ -101,7 +75,6 @@ pub fn ServiceRatesList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Service Title".into(),
                     TableCellData::String(
@@ -115,7 +88,6 @@ pub fn ServiceRatesList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Base Rate".into(),
                     TableCellData::String(format!(
@@ -142,7 +114,7 @@ pub fn ServiceRatesList() -> impl IntoView {
             <div class="display-constraints">
                 <Breadcrumbs custom_route_names=["Home", "Dashboard", "Service Rates"] />
             </div>
-            <Show when=move || is_loading.get()>
+            <Show when=move || billing_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 
@@ -174,126 +146,68 @@ pub fn CreateServiceRate() -> impl IntoView {
     let selected_services_options = RwSignal::new(vec![] as Vec<String>);
     let selected_currency_options = RwSignal::new(vec![] as Vec<String>);
     let submit_is_disabled = Memo::new(move |_| {
-        (!main_form_is_valid.get()
+        !main_form_is_valid.get()
             || selected_services_options.get().is_empty()
-            || selected_currency_options.get().is_empty())
+            || selected_currency_options.get().is_empty()
     });
-    let store = expect_context::<Store<AppStateContext>>();
-    let services = move || store.services();
-    let currencies = move || store.currencies();
+    let billing_ctx = use_billing();
+    let portfolio_ctx = use_portfolio();
+    let services = move || portfolio_ctx.services;
+    let currencies = move || billing_ctx.currencies;
     let success_modal_is_open = RwSignal::new(false);
     let confirm_modal_is_open = RwSignal::new(false);
-    let (is_loading, set_is_loading) = signal(false);
     let services_options = RwSignal::new(vec![] as Vec<SelectOption>);
     let currency_options = RwSignal::new(vec![] as Vec<SelectOption>);
 
-    let onprimary_handler = Callback::new(move |_| {
-        if !selected_services_options.get().is_empty()
-            && !selected_currency_options.get().is_empty()
-            && main_form_is_valid.get()
-        {
-            set_is_loading.set(true);
-            spawn_local(async move {
-                let deserialized_main_form_data = deserialize_form_with_options::<ServiceRateInput>(
-                    &form_ref,
-                    &Default::default(),
-                );
-
-                if deserialized_main_form_data.is_none() {
-                    set_is_loading.set(false);
-                    return;
+    // React to successful creation.
+    Effect::new(move |prev: Option<u64>| {
+        let dirty = billing_ctx.service_rate_created_dirty.get();
+        if let Some(prev) = prev {
+            if dirty != prev {
+                if let Some(form) = form_ref
+                    .get_untracked()
+                    .and_then(|el: HtmlFormElement| el.dyn_into::<HtmlFormElement>().ok())
+                {
+                    form.reset();
+                    set_main_form_is_valid.set(false);
                 }
-
-                let deserialized_main_form_data = deserialized_main_form_data.unwrap();
-
-                let input_vars = CreateServiceRateVars {
-                    service_rate_input: deserialized_main_form_data,
-                    service_rate_input_metadata: ServiceRateInputMetadata {
-                        service_id: selected_services_options.get_untracked().join(","),
-                        currency_id: selected_currency_options.get_untracked().join(","),
-                    },
-                };
-
-                let query = r#"
-                       mutation CreateServiceRate($serviceRateInput: ServiceRateInput!, $serviceRateInputMetadata: ServiceRateInputMetadata!) {
-                            createServiceRate(serviceRateInput: $serviceRateInput, serviceRateInputMetadata: $serviceRateInputMetadata) {
-                               data {
-                                    hourWeek
-                                    createdAt
-                                    updatedAt
-                                    id
-                                    baseRate
-                               }
-                               metadata {
-                                    newAccessToken
-                                    requestId
-                               }
-                           }
-                       }
-                   "#;
-
-                let mut headers = HashMap::new() as HashMap<String, String>;
-                headers.insert(
-                    "Authorization".into(),
-                    format!(
-                        "Bearer {}",
-                        store.user().auth_info().token().get_untracked()
-                    ),
-                );
-
-                let Some(shared_service_api) = SHARED_SERVICE_API else {
-                    return;
-                };
-
-                let response =
-                    perform_mutation_or_query_with_vars::<
-                        CreateServiceRateResponse,
-                        CreateServiceRateVars,
-                    >(Some(&headers), shared_service_api, query, input_vars)
-                    .await;
-
-                match response.get_data() {
-                    Some(_data) => {
-                        if let Some(form) = form_ref
-                            .get_untracked()
-                            .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
-                        {
-                            form.reset();
-                            set_main_form_is_valid.set(false);
-                        } else {
-                        }
-
-                        set_is_loading.set(false);
-
-                        success_modal_is_open.update(|status| *status = true);
-                    }
-                    None => {
-                        set_is_loading.set(false);
-                    }
-                };
-            });
+                selected_services_options.set(vec![]);
+                selected_currency_options.set(vec![]);
+                success_modal_is_open.set(true);
+            }
         }
+        dirty
     });
 
-    Effect::new(move || {
-        spawn_local(async move {
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
+    let onprimary_handler = Callback::new(move |_| {
+        if selected_services_options.get().is_empty()
+            || selected_currency_options.get().is_empty()
+            || !main_form_is_valid.get()
+        {
+            return;
+        }
 
-            let _fetch_services_res = fetch_services(&store, Some(&headers)).await;
-            let _fetch_currencies_res = fetch_currencies(&store, Some(&headers)).await;
+        let Some(service_rate_input) =
+            deserialize_form_with_options::<ServiceRateInput>(&form_ref, &Default::default())
+        else {
+            return;
+        };
 
-            set_is_loading.set(false);
-        });
+        billing_ctx.create_service_rate(
+            service_rate_input,
+            selected_services_options.get_untracked().join(","),
+            selected_currency_options.get_untracked().join(","),
+        );
     });
 
-    Effect::new(move || {
+    // Fetch dropdown sources on mount.
+    Effect::new(move |_| {
+        portfolio_ctx.fetch_services();
+        billing_ctx.fetch_currencies();
+    });
+
+    // Derive select options.
+    Effect::new(move |_| {
         services_options.set(
             services()
                 .get()
@@ -325,15 +239,13 @@ pub fn CreateServiceRate() -> impl IntoView {
         ev.prevent_default();
         ev.stop_propagation();
 
-        // Implement logic to show form validity
-        let target = ev
+        if let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
-
-        if let Some(form) = target {
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        {
             set_main_form_is_valid.set(form.check_validity());
 
-            if let Some(_submitter) = ev.submitter() {
+            if ev.submitter().is_some() {
                 confirm_modal_is_open.update(|status| *status = true);
             }
         }
@@ -352,7 +264,7 @@ pub fn CreateServiceRate() -> impl IntoView {
                     <p>"Are you sure that you want to submit?"</p>
                 </div>
             </BasicModal>
-            <Show when=move || is_loading.get()>
+            <Show when=move || billing_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 

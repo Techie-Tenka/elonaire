@@ -1,14 +1,9 @@
-use std::collections::HashMap;
-
 use icondata::BsPlusLg;
-use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
-use leptos::task::spawn_local;
-use leptos::wasm_bindgen::JsCast;
+use leptos::{ev::SubmitEvent, wasm_bindgen::JsCast};
 use leptos_meta::*;
 use leptos_router::components::{A, Outlet};
-use reactive_stores::Store;
-use web_sys::{FormData, HtmlFormElement, HtmlInputElement};
+use web_sys::{HtmlFormElement, HtmlInputElement};
 
 use detaxine_ui::{
     components::{
@@ -28,31 +23,14 @@ use detaxine_ui::{
         },
         navigation::breadcrumbs::Breadcrumbs,
     },
-    utils::forms::{
-        FormDeserializeOptions, deserialize_form_data_with_options, get_form_data_from_form_ref,
-    },
+    utils::forms::get_form_data_from_form_ref,
 };
 
-use crate::data::models::general::shared::RestResponse;
-use crate::data::models::graphql::shared::{
-    BlogCategory, BlogStatus, CreateBlogPostResponse, CreateBlogPostVars,
-};
 use crate::data::{
-    context::store::{AppStateContext, AppStateContextStoreFields},
-    models::{
-        general::{
-            acl::{AuthInfoStoreFields, UserInfoStoreFields},
-            files::UploadedFileResponse,
-        },
-        graphql::shared::BlogPostInput,
-    },
+    context::blog::use_blog,
+    models::graphql::shared::{BlogCategory, BlogStatus},
 };
 use crate::utils::custom_traits::EnumerableEnum;
-use crate::utils::errors::unwrap_rest_response;
-use crate::utils::graphql_client::perform_mutation_or_query_with_vars;
-
-const FILES_SERVICE_API: Option<&str> = option_env!("FILES_SERVICE_API");
-const SHARED_SERVICE_API: Option<&str> = option_env!("SHARED_SERVICE_API");
 
 #[component]
 pub fn Blog() -> impl IntoView {
@@ -76,9 +54,8 @@ pub fn BlogList() -> impl IntoView {
         vec![],
     ));
 
-    Effect::new(move || {
-        spawn_local(async move {});
-    });
+    // TODO: wire up `blog_ctx.fetch_blog_posts(headers, filters, query)` once
+    // the selection set is decided, then build the rows from `blog_ctx.blog_posts`.
 
     view! {
         <>
@@ -105,6 +82,7 @@ pub fn BlogList() -> impl IntoView {
             </div>
         </>
     }
+    .into_any()
 }
 
 #[component]
@@ -113,10 +91,10 @@ pub fn CreateBlog() -> impl IntoView {
     let thumbnail_file_input_ref = NodeRef::new();
     let (form_is_valid, set_form_is_valid) = signal(false);
     let submit_is_disabled = Memo::new(move |_| !form_is_valid.get());
-    let store = expect_context::<Store<AppStateContext>>();
     let success_modal_is_open = RwSignal::new(false);
     let confirm_modal_is_open = RwSignal::new(false);
-    let (is_loading, set_is_loading) = signal(false);
+    let blog_ctx = use_blog();
+
     let blog_statuses = RwSignal::new(
         BlogStatus::variants_slice()
             .iter()
@@ -127,203 +105,62 @@ pub fn CreateBlog() -> impl IntoView {
     let blog_categories = RwSignal::new(
         BlogCategory::variants_slice()
             .iter()
-            .map(|category| {
-                let label = category.to_string();
-
-                SelectOption::new(&format!("{category:?}"), &label)
-            })
+            .map(|category| SelectOption::new(&format!("{category:?}"), &category.to_string()))
             .collect::<Vec<SelectOption>>(),
     );
 
-    let onprimary_handler = Callback::new(move |_| {
-        if form_is_valid.get() {
-            set_is_loading.set(true);
-            if let Some(thumbnail_file_input) =
-                thumbnail_file_input_ref.to_owned().get() as Option<HtmlInputElement>
-            {
-                if let Ok(files_form_data) = FormData::new() {
-                    if let Some(thumbnail_filelist) = thumbnail_file_input.files() {
-                        for i in 0..thumbnail_filelist.length() {
-                            if let Some(file) = thumbnail_filelist.item(i) {
-                                if let Err(e) = files_form_data.append_with_blob("thumbnail", &file)
-                                {
-                                    leptos::logging::error!("Failed to append Blob: {:?}", e);
-                                };
-                            }
-                        }
-                    }
-
-                    let Some(files_service_api) = FILES_SERVICE_API else {
-                        return;
-                    };
-
-                    spawn_local(async move {
-                        let Ok(request) = gloo_net::http::Request::post(&format!(
-                            "{files_service_api}/upload/default"
-                        ))
-                        .header(
-                            "Authorization",
-                            format!(
-                                "Bearer {}",
-                                store.user().auth_info().token().get_untracked()
-                            )
-                            .as_str(),
-                        )
-                        .body(files_form_data) else {
-                            set_is_loading.set(false);
-                            return;
-                        };
-
-                        let body = match request.send().await {
-                            Ok(r) => r,
-                            Err(err) => {
-                                leptos::logging::error!("Failed to upload files: {:?}", err);
-                                set_is_loading.set(false);
-                                return;
-                            }
-                        };
-
-                        let body =
-                            match body.json::<RestResponse<Vec<UploadedFileResponse>>>().await {
-                                Ok(b) => b,
-                                Err(err) => {
-                                    leptos::logging::error!(
-                                        "Failed to parse upload response: {:?}",
-                                        err
-                                    );
-                                    set_is_loading.set(false);
-                                    return;
-                                }
-                            };
-
-                        let Some(uploaded_files) = unwrap_rest_response(body, &store, None) else {
-                            set_is_loading.set(false);
-                            return;
-                        };
-
-                        let Some(form_data) = get_form_data_from_form_ref(&form_ref) else {
-                            set_is_loading.set(false);
-                            return;
-                        };
-
-                        let Some(thumbnail) = uploaded_files
-                            .iter()
-                            .find(|file| file.field_name == "thumbnail")
-                        else {
-                            set_is_loading.set(false);
-                            return;
-                        };
-
-                        let Some(files_service_api) = FILES_SERVICE_API else {
-                            return;
-                        };
-
-                        if let Err(_e) = form_data.append_with_str(
-                            "thumbnail",
-                            format!(
-                                "{files_service_api}/view/default/{}",
-                                thumbnail.original_filename
-                            )
-                            .as_str(),
-                        ) {
-                            set_is_loading.set(false);
-                            return;
-                        }
-
-                        let Some(deserialized_form_data) =
-                            deserialize_form_data_with_options::<BlogPostInput>(
-                                &form_data,
-                                &FormDeserializeOptions {
-                                    deserialize_bool: true,
-                                    ..Default::default()
-                                },
-                            )
-                        else {
-                            set_is_loading.set(false);
-                            return;
-                        };
-
-                        let input_vars = CreateBlogPostVars {
-                            blog_post: deserialized_form_data,
-                        };
-
-                        let query = r#"
-                            mutation CreateBlogPost($blogPost: BlogPostInput!) {
-                                createBlogPost(blogPost: $blogPost) {
-                                    data {
-                                        id
-                                        shortDescription
-                                        title
-                                        status
-                                        category
-                                        link
-                                        thumbnail
-                                        publishedDate
-                                    }
-                                    metadata {
-                                        newAccessToken
-                                        requestId
-                                    }
-                                }
-                            }
-                        "#;
-
-                        let mut headers = HashMap::new() as HashMap<String, String>;
-                        headers.insert(
-                            "Authorization".into(),
-                            format!(
-                                "Bearer {}",
-                                store.user().auth_info().token().get_untracked()
-                            ),
-                        );
-
-                        let Some(shared_service_api) = SHARED_SERVICE_API else {
-                            return;
-                        };
-
-                        let response = perform_mutation_or_query_with_vars::<
-                            CreateBlogPostResponse,
-                            CreateBlogPostVars,
-                        >(
-                            Some(&headers), shared_service_api, query, input_vars
-                        )
-                        .await;
-
-                        match response.get_data() {
-                            Some(_data) => {
-                                if let Some(form) = form_ref
-                                    .get_untracked()
-                                    .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
-                                {
-                                    form.reset();
-                                    set_form_is_valid.set(false);
-                                }
-                                set_is_loading.set(false);
-                                success_modal_is_open.update(|status| *status = true);
-                            }
-                            None => {
-                                set_is_loading.set(false);
-                            }
-                        }
-                    });
-                };
-            };
+    // Reacts to a successful create: reset the form and show the success modal.
+    Effect::new(move |prev: Option<u64>| {
+        let dirty = blog_ctx.created_post_dirty.get();
+        if let Some(prev) = prev {
+            if dirty != prev {
+                if let Some(form) = form_ref
+                    .get_untracked()
+                    .and_then(|el: HtmlFormElement| el.dyn_into::<HtmlFormElement>().ok())
+                {
+                    form.reset();
+                    set_form_is_valid.set(false);
+                }
+                success_modal_is_open.set(true);
+            }
         }
+        dirty
+    });
+
+    let onprimary_handler = Callback::new(move |_| {
+        if !form_is_valid.get() {
+            return;
+        }
+
+        let Some(thumbnail_file_input) =
+            thumbnail_file_input_ref.get_untracked() as Option<HtmlInputElement>
+        else {
+            return;
+        };
+
+        let thumbnail_files: Vec<web_sys::File> = thumbnail_file_input
+            .files()
+            .map(|list| (0..list.length()).filter_map(|i| list.item(i)).collect())
+            .unwrap_or_default();
+
+        let Some(form_data) = get_form_data_from_form_ref(&form_ref) else {
+            return;
+        };
+
+        blog_ctx.create_blog_post(thumbnail_files, form_data);
     });
 
     let handle_step_form_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         ev.stop_propagation();
 
-        // Implement logic to show form validity
-        let target = ev
+        if let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
-
-        if let Some(form) = target {
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        {
             set_form_is_valid.set(form.check_validity());
 
-            if let Some(_submitter) = ev.submitter() {
+            if ev.submitter().is_some() {
                 confirm_modal_is_open.update(|status| *status = true);
             }
         }
@@ -342,7 +179,7 @@ pub fn CreateBlog() -> impl IntoView {
                     <p>"Are you sure that you want to submit?"</p>
                 </div>
             </BasicModal>
-            <Show when=move || is_loading.get()>
+            <Show when=move || blog_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 
@@ -356,45 +193,13 @@ pub fn CreateBlog() -> impl IntoView {
                 <div class="display-constraints flex flex-col gap-[20px]">
                     <InputField field_type=InputFieldType::Text label="Title" required=true id_attr="title" name="title" />
                     <Textarea label="Short Description" required=true id_attr="short_description" name="short_description" />
-                    <SelectInput
-                    label="Status"
-                    name="status"
-                    required=true
-                    id_attr="status"
-                    placeholder="Select Status"
-                    options=blog_statuses
-                    />
-                    <SelectInput
-                    label="Category"
-                    name="category"
-                    required=true
-                    id_attr="category"
-                    placeholder="Select Category"
-                    options=blog_categories
-                    />
-                    <ToggleSwitch
-                       label_active="Premium"
-                       label_inactive="Free"
-                       name="is_premium"
-                       id_attr="is_premium"
-                       initial_active_state=false
-                    />
-
-                    <ToggleSwitch
-                          label_active="Featured"
-                          label_inactive="Not Featured"
-                          name="is_featured"
-                          id_attr="is_featured"
-                          initial_active_state=false
-                    />
+                    <SelectInput label="Status" name="status" required=true id_attr="status" placeholder="Select Status" options=blog_statuses />
+                    <SelectInput label="Category" name="category" required=true id_attr="category" placeholder="Select Category" options=blog_categories />
+                    <ToggleSwitch label_active="Premium" label_inactive="Free" name="is_premium" id_attr="is_premium" initial_active_state=false />
+                    <ToggleSwitch label_active="Featured" label_inactive="Not Featured" name="is_featured" id_attr="is_featured" initial_active_state=false />
                     <CustomFileInput input_node_ref=thumbnail_file_input_ref label="Thumbnail" name="thumbnail" id_attr="thumbnail" accept="image/*" required=true />
                     <RichTextEditor name="content" extra_formating_options=vec![ExtraFormatingOption::InlineCode, ExtraFormatingOption::CodeBlock, ExtraFormatingOption::MarkdownUpload, ExtraFormatingOption::ImageUpload, ExtraFormatingOption::Lists, ExtraFormatingOption::Heading] />
-                    <BasicButton
-                        button_text="Submit"
-                        style_ext="bg-primary text-contrast-white"
-                        button_type=ButtonType::Submit
-                        disabled=submit_is_disabled
-                    />
+                    <BasicButton button_text="Submit" style_ext="bg-primary text-contrast-white" button_type=ButtonType::Submit disabled=submit_is_disabled />
                 </div>
             </ReactiveForm>
         </>

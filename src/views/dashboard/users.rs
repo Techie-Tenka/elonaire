@@ -23,25 +23,15 @@ use detaxine_ui::{
 use icondata::BsPlusLg;
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
-use leptos::task::spawn_local;
 use leptos::wasm_bindgen::JsCast;
 use leptos_meta::*;
 use leptos_router::components::{A, Outlet};
-use reactive_stores::Store;
 use web_sys::HtmlFormElement;
 
-use crate::data::models::graphql::acl::{
-    AccountStatus, FetchUsersResponse, SignUpResponse, SignUpVars, UserInput,
-};
 use crate::data::{
-    context::store::{AppStateContext, AppStateContextStoreFields},
-    models::general::acl::{AuthInfoStoreFields, UserInfoStoreFields},
+    context::user::use_user,
+    models::graphql::acl::{AccountStatus, UserInput},
 };
-use crate::utils::graphql_client::{
-    perform_mutation_or_query_with_vars, perform_query_without_vars,
-};
-
-const ACL_SERVICE_API: Option<&str> = option_env!("ACL_SERVICE_API");
 
 #[component]
 pub fn Users() -> impl IntoView {
@@ -55,8 +45,8 @@ pub fn Users() -> impl IntoView {
 
 #[component]
 pub fn UsersList() -> impl IntoView {
-    let store = expect_context::<Store<AppStateContext>>();
-    let (is_loading, set_is_loading) = signal(false);
+    let user_ctx = use_user();
+    let users = move || user_ctx.users;
 
     let table_data = RwSignal::new((
         vec![
@@ -68,117 +58,65 @@ pub fn UsersList() -> impl IntoView {
         vec![],
     ));
 
+    Effect::new(move |_| {
+        user_ctx.fetch_users();
+    });
+
     Effect::new(move || {
-        set_is_loading.set(true);
-        spawn_local(async move {
-            let fetch_users_query = r#"
-                   query FetchUsers {
-                        fetchUsers {
-                            data {
-                                id
-                                email
-                                status
-                                oauthClient
-                                fullName
-                            }
-                            metadata {
-                                newAccessToken
-                                requestId
-                            }
-                        }
-                   }
-               "#;
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
+        let users_rows: Vec<HashMap<String, TableCellData>> = users()
+            .get()
+            .iter()
+            .map(|user| {
+                let mut hash_map_data = HashMap::new();
 
-            let Some(acl_service_api) = ACL_SERVICE_API else {
-                return;
-            };
+                hash_map_data.insert(
+                    "id".to_string(),
+                    TableCellData::String(
+                        user.id.as_ref().unwrap_or(&Default::default()).to_owned(),
+                    ),
+                );
+                hash_map_data.insert(
+                    "Full Name".to_string(),
+                    TableCellData::String(
+                        user.full_name.as_ref().unwrap_or(&String::new()).to_owned(),
+                    ),
+                );
+                hash_map_data.insert(
+                    "Email".to_string(),
+                    TableCellData::String(user.email.to_owned()),
+                );
 
-            let fetch_users_response = perform_query_without_vars::<FetchUsersResponse>(
-                Some(&headers),
-                acl_service_api,
-                fetch_users_query,
-            )
-            .await;
+                let oauth_client = match user.oauth_client {
+                    Some(client) => format!("{:?}", client),
+                    None => String::from("None"),
+                };
+                hash_map_data.insert(
+                    "OAuth Client".to_string(),
+                    TableCellData::String(oauth_client),
+                );
 
-            match fetch_users_response.get_data() {
-                Some(data) => {
-                    let users: Vec<HashMap<String, TableCellData>> = data
-                        .fetch_users
-                        .as_ref()
-                        .unwrap_or(&Default::default())
-                        .get_data()
-                        .to_vec()
-                        .iter()
-                        .map(|user| {
-                            let mut hash_map_data = HashMap::new();
+                let status = match user.status.as_ref().unwrap_or(&AccountStatus::Inactive) {
+                    AccountStatus::Active => ViewFn::from(move || {
+                        view! { <LabelTag label="Active" color=ColorTemperature::Success /> }
+                    }),
+                    AccountStatus::Inactive => ViewFn::from(move || {
+                        view! { <LabelTag label="InActive" color=ColorTemperature::Info /> }
+                    }),
+                    AccountStatus::Suspended => ViewFn::from(move || {
+                        view! { <LabelTag label="Suspended" color=ColorTemperature::Warning /> }
+                    }),
+                    AccountStatus::Deleted => ViewFn::from(move || {
+                        view! { <LabelTag label="Deleted" color=ColorTemperature::Danger /> }
+                    }),
+                };
+                hash_map_data.insert("Status".to_string(), TableCellData::Html(status));
 
-                            // This id is the unique identifier of the table row. and is a MUST for the table to function properly.
-                            // *Note:* The id is a MUST for the table to function properly. You might be forced to generate a unique id for each row if your data does not have a unique identifier.
-                            hash_map_data.insert(
-                                "id".to_string(),
-                                TableCellData::String(user.id.as_ref().unwrap_or(&Default::default()).to_owned()),
-                            );
+                hash_map_data
+            })
+            .collect();
 
-                            hash_map_data.insert(
-                                "Full Name".to_string(),
-                                TableCellData::String(
-                                    user.full_name.as_ref().unwrap_or(&String::new()).to_owned(),
-                                ),
-                            );
-                            hash_map_data.insert(
-                                "Email".to_string(),
-                                TableCellData::String(user.email.to_owned()),
-                            );
-                            let oauth_client = match user.oauth_client {
-                                Some(client) => format!("{:?}", client),
-                                None => String::from("None")
-                            };
-                            hash_map_data.insert(
-                                "OAuth Client".to_string(),
-                                TableCellData::String(
-                                    oauth_client,
-                                ),
-                            );
-                            let status = match user.status.as_ref().unwrap_or(&AccountStatus::Inactive) {
-                                AccountStatus::Active => ViewFn::from(move || view! {
-                                    <LabelTag label="Active" color=ColorTemperature::Success />
-                                }),
-                                AccountStatus::Inactive => ViewFn::from(move || view! {
-                                    <LabelTag label="InActive" color=ColorTemperature::Info />
-                                }),
-                                AccountStatus::Suspended => ViewFn::from(move || view! {
-                                    <LabelTag label="Suspended" color=ColorTemperature::Warning />
-                                }),
-                                AccountStatus::Deleted => ViewFn::from(move || view! {
-                                    <LabelTag label="Deleted" color=ColorTemperature::Danger />
-                                }),
-                            };
-                            hash_map_data.insert(
-                                "Status".to_string(),
-                                TableCellData::Html(status),
-                            );
-                            hash_map_data
-                        })
-                        .collect();
-
-                    table_data.update(move |prev| {
-                        prev.1 = users;
-                    });
-
-                    set_is_loading.set(false);
-                }
-                None => {
-                    set_is_loading.set(false);
-                }
-            };
+        table_data.update(move |prev| {
+            prev.1 = users_rows;
         });
     });
 
@@ -188,7 +126,7 @@ pub fn UsersList() -> impl IntoView {
             <div class="display-constraints">
                 <Breadcrumbs custom_route_names=["Home", "Dashboard", "Users"] />
             </div>
-            <Show when=move || is_loading.get()>
+            <Show when=move || user_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 
@@ -218,108 +156,57 @@ pub fn CreateUser() -> impl IntoView {
     let form_ref = NodeRef::new();
     let (form_is_valid, set_form_is_valid) = signal(false);
     let submit_is_disabled = Memo::new(move |_| !form_is_valid.get());
-    let store = expect_context::<Store<AppStateContext>>();
+    let user_ctx = use_user();
     let success_modal_is_open = RwSignal::new(false);
     let confirm_modal_is_open = RwSignal::new(false);
-    let (is_loading, set_is_loading) = signal(false);
+
+    // React to successful creation.
+    Effect::new(move |prev: Option<u64>| {
+        let dirty = user_ctx.user_created_dirty.get();
+        if let Some(prev) = prev {
+            if dirty != prev {
+                if let Some(form) = form_ref
+                    .get_untracked()
+                    .and_then(|el: HtmlFormElement| el.dyn_into::<HtmlFormElement>().ok())
+                {
+                    form.reset();
+                    set_form_is_valid.set(false);
+                }
+                success_modal_is_open.set(true);
+            }
+        }
+        dirty
+    });
 
     let onprimary_handler = Callback::new(move |_| {
-        if form_is_valid.get() {
-            set_is_loading.set(true);
-            spawn_local(async move {
-                let deserialized_form_data = deserialize_form_with_options::<UserInput>(
-                    &form_ref,
-                    &FormDeserializeOptions {
-                        deserialize_bool: true,
-                        ..Default::default()
-                    },
-                );
-
-                if deserialized_form_data.is_none() {
-                    set_is_loading.set(false);
-                    return;
-                }
-
-                let deserialized_form_data = deserialized_form_data.unwrap_or_default();
-
-                let input_vars = SignUpVars {
-                    user: deserialized_form_data,
-                };
-
-                let query = r#"
-                       mutation SignUp($user: UserInput!) {
-                            signUp(user: $user) {
-                                data {
-                                    id
-                                    fullName
-                                    email
-                                    status
-                                    oauthClient
-                                }
-                                metadata {
-                                    newAccessToken
-                                    requestId
-                                }
-                            }
-                       }
-                   "#;
-
-                let mut headers = HashMap::new() as HashMap<String, String>;
-                headers.insert(
-                    "Authorization".into(),
-                    format!(
-                        "Bearer {}",
-                        store.user().auth_info().token().get_untracked()
-                    ),
-                );
-
-                let Some(acl_service_api) = ACL_SERVICE_API else {
-                    return;
-                };
-
-                let response = perform_mutation_or_query_with_vars::<SignUpResponse, SignUpVars>(
-                    Some(&headers),
-                    acl_service_api,
-                    query,
-                    input_vars,
-                )
-                .await;
-
-                match response.get_data() {
-                    Some(_data) => {
-                        if let Some(form) = form_ref
-                            .get_untracked()
-                            .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
-                        {
-                            form.reset();
-                            set_form_is_valid.set(false);
-                        } else {
-                        }
-                        set_is_loading.set(false);
-
-                        success_modal_is_open.update(|status| *status = true);
-                    }
-                    None => {
-                        set_is_loading.set(false);
-                    }
-                };
-            });
+        if !form_is_valid.get() {
+            return;
         }
+
+        let Some(user_input) = deserialize_form_with_options::<UserInput>(
+            &form_ref,
+            &FormDeserializeOptions {
+                deserialize_bool: true,
+                ..Default::default()
+            },
+        ) else {
+            return;
+        };
+
+        user_ctx.create_user(user_input);
     });
 
     let handle_step_form_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         ev.stop_propagation();
 
-        // Implement logic to show form validity
-        let target = ev
+        if let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
-
-        if let Some(form) = target {
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        {
             set_form_is_valid.set(form.check_validity());
 
-            if let Some(_submitter) = ev.submitter() {
+            if ev.submitter().is_some() {
                 confirm_modal_is_open.update(|status| *status = true);
             }
         }
@@ -338,7 +225,7 @@ pub fn CreateUser() -> impl IntoView {
                     <p>"Are you sure that you want to submit?"</p>
                 </div>
             </BasicModal>
-            <Show when=move || is_loading.get()>
+            <Show when=move || user_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 
