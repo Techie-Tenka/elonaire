@@ -36,5 +36,5 @@ pub struct RestResponse<T> {
     pub success: bool,
     pub data: Option<T>,
     pub error: Option<LocalRestErrorMessage>,
-    pub metadata: ApiResponseMetadata,
+    pub metadata: Option<ApiResponseMetadata>,
 }

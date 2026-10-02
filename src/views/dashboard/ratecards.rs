@@ -20,24 +20,15 @@ use detaxine_ui::{
 use icondata::BsPlusLg;
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
-use leptos::task::spawn_local;
 use leptos::wasm_bindgen::JsCast;
 use leptos_meta::*;
 use leptos_router::components::{A, Outlet};
-use reactive_stores::Store;
 use web_sys::HtmlFormElement;
 
-use crate::data::context::shared::{fetch_ratecards, fetch_services};
-use crate::data::models::graphql::shared::{
-    CreateRatecardResponse, CreateRatecardVars, RatecardInput, RatecardInputMetadata,
-};
 use crate::data::{
-    context::store::{AppStateContext, AppStateContextStoreFields},
-    models::general::acl::{AuthInfoStoreFields, UserInfoStoreFields},
+    context::{auth::use_auth, billing::use_billing, portfolio::use_portfolio},
+    models::graphql::shared::RatecardInput,
 };
-use crate::utils::graphql_client::perform_mutation_or_query_with_vars;
-
-const SHARED_SERVICE_API: Option<&str> = option_env!("SHARED_SERVICE_API");
 
 #[component]
 pub fn Ratecards() -> impl IntoView {
@@ -51,9 +42,8 @@ pub fn Ratecards() -> impl IntoView {
 
 #[component]
 pub fn RatecardsList() -> impl IntoView {
-    let store = expect_context::<Store<AppStateContext>>();
-    let ratecards = move || store.ratecards();
-    let (is_loading, set_is_loading) = signal(false);
+    let billing_ctx = use_billing();
+    let ratecards = move || billing_ctx.ratecards;
 
     let table_data = RwSignal::new((
         vec![
@@ -63,22 +53,8 @@ pub fn RatecardsList() -> impl IntoView {
         vec![],
     ));
 
-    Effect::new(move || {
-        set_is_loading.set(true);
-        spawn_local(async move {
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
-
-            let _response = fetch_ratecards(&store, Some(&headers)).await;
-
-            set_is_loading.set(false);
-        });
+    Effect::new(move |_| {
+        billing_ctx.fetch_ratecards();
     });
 
     Effect::new(move || {
@@ -88,8 +64,6 @@ pub fn RatecardsList() -> impl IntoView {
             .map(|ratecard| {
                 let mut hash_map_data = HashMap::new();
 
-                // This id is the unique identifier of the table row. and is a MUST for the table to function properly.
-                // *Note:* The id is a MUST for the table to function properly. You might be forced to generate a unique id for each row if your data does not have a unique identifier.
                 hash_map_data.insert(
                     "id".into(),
                     TableCellData::String(
@@ -100,7 +74,6 @@ pub fn RatecardsList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Name".into(),
                     TableCellData::String(
@@ -111,7 +84,6 @@ pub fn RatecardsList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Date of Creation".into(),
                     TableCellData::DateTime(
@@ -137,7 +109,7 @@ pub fn RatecardsList() -> impl IntoView {
             <div class="display-constraints">
                 <Breadcrumbs custom_route_names=["Home", "Dashboard", "Rate Cards"] />
             </div>
-            <Show when=move || is_loading.get()>
+            <Show when=move || billing_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 
@@ -167,123 +139,56 @@ pub fn CreateRatecard() -> impl IntoView {
     let form_ref = NodeRef::new();
     let (main_form_is_valid, set_main_form_is_valid) = signal(false);
     let selected_services_options = RwSignal::new(vec![] as Vec<String>);
-    let submit_is_disabled = Memo::new(move |_| {
-        (!main_form_is_valid.get() || selected_services_options.get().is_empty())
-    });
-    let store = expect_context::<Store<AppStateContext>>();
-    let services = move || store.services();
+    let submit_is_disabled =
+        Memo::new(move |_| !main_form_is_valid.get() || selected_services_options.get().is_empty());
+    let billing_ctx = use_billing();
+    let portfolio_ctx = use_portfolio();
+    let auth_ctx = use_auth();
+    let services = move || portfolio_ctx.services;
     let success_modal_is_open = RwSignal::new(false);
     let confirm_modal_is_open = RwSignal::new(false);
-    let (is_loading, set_is_loading) = signal(false);
     let services_options = RwSignal::new(vec![] as Vec<SelectOption>);
 
-    let onprimary_handler = Callback::new(move |_| {
-        if !selected_services_options.get().is_empty() && main_form_is_valid.get() {
-            set_is_loading.set(true);
-            spawn_local(async move {
-                let deserialized_main_form_data =
-                    deserialize_form_with_options::<RatecardInput>(&form_ref, &Default::default());
-
-                if deserialized_main_form_data.is_none() {
-                    set_is_loading.set(false);
-                    return;
+    // React to successful creation.
+    Effect::new(move |prev: Option<u64>| {
+        let dirty = billing_ctx.ratecard_created_dirty.get();
+        if let Some(prev) = prev {
+            if dirty != prev {
+                if let Some(form) = form_ref
+                    .get_untracked()
+                    .and_then(|el: HtmlFormElement| el.dyn_into::<HtmlFormElement>().ok())
+                {
+                    form.reset();
+                    set_main_form_is_valid.set(false);
                 }
-
-                let deserialized_main_form_data = deserialized_main_form_data.unwrap();
-
-                let input_vars = CreateRatecardVars {
-                    ratecard_input: deserialized_main_form_data,
-                    ratecard_input_metadata: RatecardInputMetadata {
-                        service_ids: selected_services_options.get_untracked(),
-                    },
-                };
-
-                let query = r#"
-                       mutation CreateRatecard($ratecardInput: RatecardInput!, $ratecardInputMetadata: RatecardInputMetadata!) {
-                            createRatecard(ratecardInput: $ratecardInput, ratecardInputMetadata: $ratecardInputMetadata) {
-                                data {
-                                    name
-                                    createdAt
-                                    updatedAt
-                                    id
-                                    services {
-                                        title
-                                        description
-                                        thumbnail
-                                        id
-                                    }
-                                }
-                                metadata {
-                                    newAccessToken
-                                    requestId
-                                }
-                           }
-                       }
-                   "#;
-
-                let mut headers = HashMap::new() as HashMap<String, String>;
-                headers.insert(
-                    "Authorization".into(),
-                    format!(
-                        "Bearer {}",
-                        store.user().auth_info().token().get_untracked()
-                    ),
-                );
-
-                let Some(shared_service_api) = SHARED_SERVICE_API else {
-                    return;
-                };
-
-                let response = perform_mutation_or_query_with_vars::<
-                    CreateRatecardResponse,
-                    CreateRatecardVars,
-                >(
-                    Some(&headers), shared_service_api, query, input_vars
-                )
-                .await;
-
-                match response.get_data() {
-                    Some(_data) => {
-                        if let Some(form) = form_ref
-                            .get_untracked()
-                            .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
-                        {
-                            form.reset();
-                            set_main_form_is_valid.set(false);
-                        } else {
-                        }
-
-                        set_is_loading.set(false);
-
-                        success_modal_is_open.update(|status| *status = true);
-                        selected_services_options.set(vec![]);
-                    }
-                    None => {
-                        set_is_loading.set(false);
-                    }
-                };
-            });
+                selected_services_options.set(vec![]);
+                success_modal_is_open.set(true);
+            }
         }
+        dirty
     });
 
-    Effect::new(move || {
-        spawn_local(async move {
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
+    let onprimary_handler = Callback::new(move |_| {
+        if selected_services_options.get().is_empty() || !main_form_is_valid.get() {
+            return;
+        }
 
-            let _fetch_services_res = fetch_services(&store, Some(&headers)).await;
+        let Some(ratecard_input) =
+            deserialize_form_with_options::<RatecardInput>(&form_ref, &Default::default())
+        else {
+            return;
+        };
 
-            set_is_loading.set(false);
-        });
+        billing_ctx.create_ratecard(ratecard_input, selected_services_options.get_untracked());
     });
 
-    Effect::new(move || {
+    // Fetch the services dropdown source on mount.
+    Effect::new(move |_| {
+        portfolio_ctx.fetch_services();
+    });
+
+    // Derive the select options from the portfolio signal.
+    Effect::new(move |_| {
         services_options.set(
             services()
                 .get()
@@ -302,15 +207,13 @@ pub fn CreateRatecard() -> impl IntoView {
         ev.prevent_default();
         ev.stop_propagation();
 
-        // Implement logic to show form validity
-        let target = ev
+        if let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
-
-        if let Some(form) = target {
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        {
             set_main_form_is_valid.set(form.check_validity());
 
-            if let Some(_submitter) = ev.submitter() {
+            if ev.submitter().is_some() {
                 confirm_modal_is_open.update(|status| *status = true);
             }
         }
@@ -329,7 +232,7 @@ pub fn CreateRatecard() -> impl IntoView {
                     <p>"Are you sure that you want to submit?"</p>
                 </div>
             </BasicModal>
-            <Show when=move || is_loading.get()>
+            <Show when=move || billing_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 

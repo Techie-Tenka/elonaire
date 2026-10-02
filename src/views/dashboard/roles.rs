@@ -25,27 +25,14 @@ use detaxine_ui::{
 use icondata::BsPlusLg;
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
-use leptos::task::spawn_local;
 use leptos::wasm_bindgen::JsCast;
 use leptos_meta::*;
 use leptos_router::components::{A, Outlet};
-use reactive_stores::Store;
 use web_sys::HtmlFormElement;
 
-use crate::data::context::shared::{
-    fetch_departments, fetch_organizations, fetch_permissions, fetch_roles,
-};
-use crate::data::models::graphql::acl::{
-    AdminPrivilege, CreateSystemRoleResponse, CreateSystemRoleVars, RoleInput, RoleMetadata,
-};
-use crate::data::{
-    context::store::{AppStateContext, AppStateContextStoreFields},
-    models::general::acl::{AuthInfoStoreFields, UserInfoStoreFields},
-};
+use crate::data::context::acl::use_acl;
+use crate::data::models::graphql::acl::{AdminPrivilege, RoleInput, RoleMetadata};
 use crate::utils::custom_traits::EnumerableEnum;
-use crate::utils::graphql_client::perform_mutation_or_query_with_vars;
-
-const ACL_SERVICE_API: Option<&str> = option_env!("ACL_SERVICE_API");
 
 #[component]
 pub fn Roles() -> impl IntoView {
@@ -59,9 +46,8 @@ pub fn Roles() -> impl IntoView {
 
 #[component]
 pub fn RolesList() -> impl IntoView {
-    let store = expect_context::<Store<AppStateContext>>();
-    let roles = move || store.roles();
-    let (is_loading, set_is_loading) = signal(false);
+    let acl_ctx = use_acl();
+    let roles = move || acl_ctx.roles;
 
     let table_data = RwSignal::new((
         vec![
@@ -71,22 +57,8 @@ pub fn RolesList() -> impl IntoView {
         vec![],
     ));
 
-    Effect::new(move || {
-        set_is_loading.set(true);
-        spawn_local(async move {
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
-
-            let _fetch_roles_response = fetch_roles(&store, Some(&headers)).await;
-
-            set_is_loading.set(false);
-        });
+    Effect::new(move |_| {
+        acl_ctx.fetch_roles();
     });
 
     Effect::new(move || {
@@ -96,15 +68,12 @@ pub fn RolesList() -> impl IntoView {
             .map(|role| {
                 let mut hash_map_data = HashMap::new();
 
-                // This id is the unique identifier of the table row. and is a MUST for the table to function properly.
-                // *Note:* The id is a MUST for the table to function properly. You might be forced to generate a unique id for each row if your data does not have a unique identifier.
                 hash_map_data.insert(
                     "id".to_string(),
                     TableCellData::String(
                         role.id.as_ref().unwrap_or(&Default::default()).to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Role Name".to_string(),
                     TableCellData::String(
@@ -114,28 +83,21 @@ pub fn RolesList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-                let privilege =
-                    if role.is_admin.is_some() && role.is_admin.unwrap_or(Default::default()) {
-                        ViewFn::from(move || {
-                            view! {
-                                <LabelTag label="Admin" color=ColorTemperature::Warning />
-                            }
-                        })
-                    } else if role.is_super_admin.is_some()
-                        && role.is_super_admin.unwrap_or(Default::default())
-                    {
-                        ViewFn::from(move || {
-                            view! {
-                                <LabelTag label="Super Admin" color=ColorTemperature::Danger />
-                            }
-                        })
-                    } else {
-                        ViewFn::from(move || {
-                            view! {
-                                <LabelTag label="None" />
-                            }
-                        })
-                    };
+                let privilege = if role.is_admin.is_some()
+                    && role.is_admin.unwrap_or(Default::default())
+                {
+                    ViewFn::from(move || {
+                        view! { <LabelTag label="Admin" color=ColorTemperature::Warning /> }
+                    })
+                } else if role.is_super_admin.is_some()
+                    && role.is_super_admin.unwrap_or(Default::default())
+                {
+                    ViewFn::from(move || {
+                        view! { <LabelTag label="Super Admin" color=ColorTemperature::Danger /> }
+                    })
+                } else {
+                    ViewFn::from(move || view! { <LabelTag label="None" /> })
+                };
                 hash_map_data.insert("Privilege".to_string(), TableCellData::Html(privilege));
                 hash_map_data
             })
@@ -152,7 +114,7 @@ pub fn RolesList() -> impl IntoView {
             <div class="display-constraints">
                 <Breadcrumbs custom_route_names=["Home", "Dashboard", "Roles"] />
             </div>
-            <Show when=move || is_loading.get()>
+            <Show when=move || acl_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 
@@ -184,14 +146,13 @@ pub fn CreateRole() -> impl IntoView {
     let (main_form_is_valid, set_main_form_is_valid) = signal(false);
     let (metadata_form_is_valid, set_metadata_form_is_valid) = signal(false);
     let submit_is_disabled =
-        Memo::new(move |_| (!main_form_is_valid.get() || !metadata_form_is_valid.get()));
-    let store = expect_context::<Store<AppStateContext>>();
-    let departments = move || store.departments();
-    let organizations = move || store.organizations();
-    let permissions = move || store.permissions();
+        Memo::new(move |_| !main_form_is_valid.get() || !metadata_form_is_valid.get());
+    let acl_ctx = use_acl();
+    let departments = move || acl_ctx.departments;
+    let organizations = move || acl_ctx.organizations;
+    let permissions = move || acl_ctx.permissions;
     let success_modal_is_open = RwSignal::new(false);
     let confirm_modal_is_open = RwSignal::new(false);
-    let (is_loading, set_is_loading) = signal(false);
     let departments_options = RwSignal::new(vec![] as Vec<SelectOption>);
     let organizations_options = RwSignal::new(vec![] as Vec<SelectOption>);
     let permissions_options = RwSignal::new(vec![] as Vec<CheckboxOption>);
@@ -208,128 +169,63 @@ pub fn CreateRole() -> impl IntoView {
             .collect::<Vec<SelectOption>>(),
     );
 
-    let onprimary_handler = Callback::new(move |_| {
-        if metadata_form_is_valid.get() && main_form_is_valid.get() {
-            set_is_loading.set(true);
-            spawn_local(async move {
-                let deserialized_main_form_data =
-                    deserialize_form_with_options::<RoleInput>(&form_ref, &Default::default());
-                let deserialized_metadata_form_data = deserialize_form_with_options::<RoleMetadata>(
-                    &metadata_form_ref,
-                    &FormDeserializeOptions {
-                        vec_fields: Some(&["permission_ids"]),
-                        ..Default::default()
-                    },
-                );
-
-                if deserialized_main_form_data.is_none()
-                    || deserialized_metadata_form_data.is_none()
+    // React to successful creation.
+    Effect::new(move |prev: Option<u64>| {
+        let dirty = acl_ctx.system_role_created_dirty.get();
+        if let Some(prev) = prev {
+            if dirty != prev {
+                if let Some(form) = form_ref
+                    .get_untracked()
+                    .and_then(|el: HtmlFormElement| el.dyn_into::<HtmlFormElement>().ok())
                 {
-                    set_is_loading.set(false);
-                    return;
+                    form.reset();
+                    set_main_form_is_valid.set(false);
                 }
-
-                let deserialized_main_form_data = deserialized_main_form_data.unwrap_or_default();
-                let deserialized_metadata_form_data =
-                    deserialized_metadata_form_data.unwrap_or_default();
-
-                let input_vars = CreateSystemRoleVars {
-                    role_input: deserialized_main_form_data,
-                    role_metadata: deserialized_metadata_form_data,
-                };
-
-                let query = r#"
-                       mutation CreateSystemRole($roleInput: RoleInput!, $roleMetadata: RoleMetadata!) {
-                            createSystemRole(roleInput: $roleInput, roleMetadata: $roleMetadata) {
-                                data {
-                                    roleName
-                                    createdAt
-                                    isAdmin
-                                    isDefault
-                                    isSuperAdmin
-                                    updatedAt
-                                    id
-                                    createdBy
-                                }
-                                metadata {
-                                    newAccessToken
-                                    requestId
-                                }
-                            }
-                       }
-                   "#;
-
-                let mut headers = HashMap::new() as HashMap<String, String>;
-                headers.insert(
-                    "Authorization".into(),
-                    format!(
-                        "Bearer {}",
-                        store.user().auth_info().token().get_untracked()
-                    ),
-                );
-
-                let Some(acl_service_api) = ACL_SERVICE_API else {
-                    return;
-                };
-
-                let response = perform_mutation_or_query_with_vars::<
-                    CreateSystemRoleResponse,
-                    CreateSystemRoleVars,
-                >(Some(&headers), acl_service_api, query, input_vars)
-                .await;
-
-                match response.get_data() {
-                    Some(_data) => {
-                        if let Some(form) = form_ref
-                            .get_untracked()
-                            .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
-                        {
-                            form.reset();
-                            set_main_form_is_valid.set(false);
-                        } else {
-                        }
-
-                        if let Some(form) = metadata_form_ref
-                            .get_untracked()
-                            .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
-                        {
-                            form.reset();
-                            set_main_form_is_valid.set(false);
-                        } else {
-                        }
-
-                        set_is_loading.set(false);
-
-                        success_modal_is_open.update(|status| *status = true);
-                    }
-                    None => {
-                        set_is_loading.set(false);
-                    }
-                };
-            });
+                if let Some(form) = metadata_form_ref
+                    .get_untracked()
+                    .and_then(|el: HtmlFormElement| el.dyn_into::<HtmlFormElement>().ok())
+                {
+                    form.reset();
+                    set_metadata_form_is_valid.set(false);
+                }
+                success_modal_is_open.set(true);
+            }
         }
+        dirty
     });
 
-    Effect::new(move || {
-        spawn_local(async move {
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
+    let onprimary_handler = Callback::new(move |_| {
+        if !(metadata_form_is_valid.get() && main_form_is_valid.get()) {
+            return;
+        }
 
-            let _fetch_organizations_res = fetch_organizations(&store, Some(&headers)).await;
-            let _fetch_departments_res = fetch_departments(&store, Some(&headers)).await;
-            let _fetch_permissions_res = fetch_permissions(&store, Some(&headers)).await;
+        let Some(role_input) =
+            deserialize_form_with_options::<RoleInput>(&form_ref, &Default::default())
+        else {
+            return;
+        };
+        let Some(role_metadata) = deserialize_form_with_options::<RoleMetadata>(
+            &metadata_form_ref,
+            &FormDeserializeOptions {
+                vec_fields: Some(&["permission_ids"]),
+                ..Default::default()
+            },
+        ) else {
+            return;
+        };
 
-            set_is_loading.set(false);
-        });
+        acl_ctx.create_system_role(role_input, role_metadata);
     });
 
-    Effect::new(move || {
+    // Kick off all three fetches on mount.
+    Effect::new(move |_| {
+        acl_ctx.fetch_organizations();
+        acl_ctx.fetch_departments();
+        acl_ctx.fetch_permissions();
+    });
+
+    // Derive select/checkbox options from the context signals.
+    Effect::new(move |_| {
         organizations_options.set(
             organizations()
                 .get()
@@ -374,13 +270,10 @@ pub fn CreateRole() -> impl IntoView {
     let handle_metadata_form_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         ev.stop_propagation();
-
-        // Implement logic to show form validity
-        let target = ev
+        if let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
-
-        if let Some(form) = target {
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        {
             set_metadata_form_is_valid.set(form.check_validity());
         }
     };
@@ -388,16 +281,12 @@ pub fn CreateRole() -> impl IntoView {
     let handle_main_form_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         ev.stop_propagation();
-
-        // Implement logic to show form validity
-        let target = ev
+        if let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
-
-        if let Some(form) = target {
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        {
             set_main_form_is_valid.set(form.check_validity());
-
-            if let Some(_submitter) = ev.submitter() {
+            if ev.submitter().is_some() {
                 confirm_modal_is_open.update(|status| *status = true);
             }
         }
@@ -416,7 +305,7 @@ pub fn CreateRole() -> impl IntoView {
                     <p>"Are you sure that you want to submit?"</p>
                 </div>
             </BasicModal>
-            <Show when=move || is_loading.get()>
+            <Show when=move || acl_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 
@@ -429,33 +318,33 @@ pub fn CreateRole() -> impl IntoView {
             <h2 class="display-constraints">Role Metadata</h2>
             <ReactiveForm on:submit=handle_metadata_form_submit form_ref=metadata_form_ref>
                 <div class="display-constraints flex flex-col gap-[20px]">
-                <SelectInput
-                label="Admin Privilege"
-                name="admin_privilege"
-                required=true
-                id_attr="admin_privilege"
-                placeholder="Select Admin Privilege"
-                options=admin_privileges
-                />
-                <SelectInput
-                label="Organization"
-                name="organization_id"
-                id_attr="organization_id"
-                placeholder="Select Organization"
-                options=organizations_options
-                />
-                <SelectInput
-                label="Department"
-                name="department_id"
-                id_attr="department_id"
-                placeholder="Select Department"
-                options=departments_options
-                />
-                <CheckboxGroup
-                    legend="Permissions"
-                    name="permission_ids"
-                    options=permissions_options
-                />
+                    <SelectInput
+                        label="Admin Privilege"
+                        name="admin_privilege"
+                        required=true
+                        id_attr="admin_privilege"
+                        placeholder="Select Admin Privilege"
+                        options=admin_privileges
+                    />
+                    <SelectInput
+                        label="Organization"
+                        name="organization_id"
+                        id_attr="organization_id"
+                        placeholder="Select Organization"
+                        options=organizations_options
+                    />
+                    <SelectInput
+                        label="Department"
+                        name="department_id"
+                        id_attr="department_id"
+                        placeholder="Select Department"
+                        options=departments_options
+                    />
+                    <CheckboxGroup
+                        legend="Permissions"
+                        name="permission_ids"
+                        options=permissions_options
+                    />
                 </div>
             </ReactiveForm>
 

@@ -1,38 +1,18 @@
-use std::collections::HashMap;
-
-use leptos::{prelude::*, task::spawn_local};
+use leptos::prelude::*;
 use leptos_meta::*;
-use reactive_stores::Store;
 
 use crate::{
     components::molecules::{headline::Headline, ratecard::RatecardComponent, top_nav::TopNav},
-    data::{
-        context::{
-            shared::fetch_ratecards,
-            store::{AppStateContext, AppStateContextStoreFields},
-        },
-        models::general::acl::{AuthInfoStoreFields, UserInfoStoreFields},
-    },
+    data::context::billing::use_billing,
 };
 
 #[component]
 pub fn Ratecard() -> impl IntoView {
-    let store = expect_context::<Store<AppStateContext>>();
-    let ratecards = move || store.ratecards();
+    let billing_ctx = use_billing();
+    let ratecards = move || billing_ctx.ratecards;
 
-    Effect::new(move || {
-        spawn_local(async move {
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
-
-            let _ratecards_res = fetch_ratecards(&store, None).await;
-        });
+    Effect::new(move |_| {
+        billing_ctx.fetch_ratecards();
     });
 
     view! {

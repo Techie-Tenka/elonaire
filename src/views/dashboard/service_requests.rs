@@ -6,16 +6,10 @@ use detaxine_ui::components::{
     navigation::breadcrumbs::Breadcrumbs,
 };
 use leptos::prelude::*;
-use leptos::task::spawn_local;
 use leptos_meta::*;
 use leptos_router::components::Outlet;
-use reactive_stores::Store;
 
-use crate::data::context::shared::fetch_service_requests;
-use crate::data::{
-    context::store::{AppStateContext, AppStateContextStoreFields},
-    models::general::acl::{AuthInfoStoreFields, UserInfoStoreFields},
-};
+use crate::data::context::billing::use_billing;
 
 #[component]
 pub fn ServiceRequests() -> impl IntoView {
@@ -29,9 +23,8 @@ pub fn ServiceRequests() -> impl IntoView {
 
 #[component]
 pub fn ServiceRequestsList() -> impl IntoView {
-    let store = expect_context::<Store<AppStateContext>>();
-    let service_requests = move || store.service_requests();
-    let (is_loading, set_is_loading) = signal(false);
+    let billing_ctx = use_billing();
+    let service_requests = move || billing_ctx.service_requests;
 
     let table_data = RwSignal::new((
         vec![
@@ -41,22 +34,8 @@ pub fn ServiceRequestsList() -> impl IntoView {
         vec![],
     ));
 
-    Effect::new(move || {
-        set_is_loading.set(true);
-        spawn_local(async move {
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
-
-            let _response = fetch_service_requests(&store, Some(&headers)).await;
-
-            set_is_loading.set(false);
-        });
+    Effect::new(move |_| {
+        billing_ctx.fetch_service_requests();
     });
 
     Effect::new(move || {
@@ -66,8 +45,6 @@ pub fn ServiceRequestsList() -> impl IntoView {
             .map(|service_request| {
                 let mut hash_map_data = HashMap::new();
 
-                // This id is the unique identifier of the table row. and is a MUST for the table to function properly.
-                // *Note:* The id is a MUST for the table to function properly. You might be forced to generate a unique id for each row if your data does not have a unique identifier.
                 hash_map_data.insert(
                     "id".into(),
                     TableCellData::String(
@@ -78,7 +55,6 @@ pub fn ServiceRequestsList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Description".into(),
                     TableCellData::String(
@@ -89,7 +65,6 @@ pub fn ServiceRequestsList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Start Date".into(),
                     TableCellData::DateTime(
@@ -115,7 +90,7 @@ pub fn ServiceRequestsList() -> impl IntoView {
             <div class="display-constraints">
                 <Breadcrumbs custom_route_names=["Home", "Dashboard", "Service Requests"] />
             </div>
-            <Show when=move || is_loading.get()>
+            <Show when=move || billing_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 

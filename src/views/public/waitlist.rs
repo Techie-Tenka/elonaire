@@ -12,133 +12,66 @@ use detaxine_ui::{
 use icondata::BsEnvelope;
 use leptos::prelude::*;
 use leptos::wasm_bindgen::JsCast;
-use wasm_bindgen_futures::spawn_local;
 use web_sys::{HtmlFormElement, SubmitEvent};
 
-use crate::{
-    data::models::graphql::email::{
-        CreateSubscriptionResponse, CreateSubscriptionVars, SubscriberInput, SubscriptionInput,
-        SubscriptionInputMetadata,
-    },
-    utils::graphql_client::perform_mutation_or_query_with_vars,
-};
-
-const MARKETPLACE_WAITLIST_MAILING_LIST_ID: Option<&str> =
-    option_env!("MARKETPLACE_WAITLIST_MAILING_LIST_ID");
-const EMAIL_SERVICE_API: Option<&str> = option_env!("EMAIL_SERVICE_API");
+use crate::data::context::{shared::use_shared, ui::UiContext};
+use crate::data::models::graphql::email::SubscriberInput;
 
 #[component]
 pub fn WaitList() -> impl IntoView {
+    let ui = expect_context::<UiContext>();
+    let shared = use_shared();
+
     let subscription_form_ref = NodeRef::new();
     let (form_is_valid, set_form_is_valid) = signal(false);
-    let subscribe_button_is_disabled = Memo::new(move |_| !form_is_valid.get());
-    let (is_loading, set_is_loading) = signal(false);
+    let subscribe_button_is_disabled =
+        Memo::new(move |_| !form_is_valid.get() || shared.is_loading.get());
     let success_modal_is_open = RwSignal::new(false);
-
-    let create_subscription = move || {
-        if form_is_valid.get() {
-            set_is_loading.set(true);
-            spawn_local(async move {
-                let Some(deserialized_form_data) = deserialize_form_with_options::<SubscriberInput>(
-                    &subscription_form_ref,
-                    &Default::default(),
-                ) else {
-                    set_is_loading.set(false);
-                    return;
-                };
-
-                let Some(marketplace_waitlist_mailing_list_id) =
-                    MARKETPLACE_WAITLIST_MAILING_LIST_ID
-                else {
-                    return;
-                };
-
-                let input_vars = CreateSubscriptionVars {
-                    subscription_input: SubscriptionInput {
-                        subscriber: deserialized_form_data,
-                        subscription_input_metadata: SubscriptionInputMetadata {
-                            mailing_list_id: marketplace_waitlist_mailing_list_id.into(),
-                        },
-                    },
-                };
-
-                let query = r#"
-                    mutation SubscribeToMailingList($subscriptionInput: SubscriptionInput!) {
-                        subscribeToMailingList(subscriptionInput: $subscriptionInput) {
-                            data {
-                                createdAt
-                                id
-                                mailingList {
-                                    name
-                                    description
-                                    createdAt
-                                    id
-                                }
-                                subscriber {
-                                    email
-                                    firstName
-                                    lastName
-                                    status
-                                    createdAt
-                                    updatedAt
-                                    id
-                                }
-                            }
-                            metadata {
-                                requestId
-                                newAccessToken
-                            }
-                        }
-                    }
-                "#;
-
-                let Some(email_service_api) = EMAIL_SERVICE_API else {
-                    return;
-                };
-
-                let response = perform_mutation_or_query_with_vars::<
-                    CreateSubscriptionResponse,
-                    CreateSubscriptionVars,
-                >(None, email_service_api, query, input_vars)
-                .await;
-
-                match response.get_data() {
-                    Some(_data) => {
-                        if let Some(form) = subscription_form_ref
-                            .get_untracked()
-                            .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
-                        {
-                            form.reset();
-                            set_form_is_valid.set(false);
-                        }
-                        set_is_loading.set(false);
-                        success_modal_is_open.update(|status| *status = true);
-                    }
-                    None => {
-                        set_is_loading.set(false);
-                    }
-                }
-            });
-        }
-    };
 
     let handle_subscribe_form_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         ev.stop_propagation();
 
-        // Implement logic to show form validity
-        let target = ev
+        let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        else {
+            return;
+        };
 
-        if let Some(form) = target {
-            set_form_is_valid.set(form.check_validity());
+        let valid = form.check_validity();
+        set_form_is_valid.set(valid);
 
-            if let Some(_submitter) = ev.submitter() {
-                // confirm_modal_is_open.update(|status| *status = true);
-                create_subscription();
-            }
+        if ev.submitter().is_none() || !valid {
+            return;
         }
+
+        let Some(subscriber) = deserialize_form_with_options::<SubscriberInput>(
+            &subscription_form_ref,
+            &Default::default(),
+        ) else {
+            ui.set_client_error("Could not read the form. Please try again.");
+            return;
+        };
+
+        let form_ref = subscription_form_ref;
+        shared.subscribe_to_marketplace_waitlist(
+            subscriber,
+            Callback::new(move |success: bool| {
+                if !success {
+                    return;
+                }
+
+                if let Some(form) = form_ref
+                    .get_untracked()
+                    .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
+                {
+                    form.reset();
+                    set_form_is_valid.set(false);
+                }
+                success_modal_is_open.set(true);
+            }),
+        );
     };
 
     view! {
@@ -187,7 +120,6 @@ pub fn WaitList() -> impl IntoView {
                     // Divider
                     <div class="flex flex-col gap-[5px] mb-20">
                         <div class="h-px bg-light-gray dark:bg-mid-gray"></div>
-                        // <div class="h-px bg-light-gray dark:bg-mid-gray"></div>
                     </div>
 
                     // What's in the marketplace

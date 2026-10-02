@@ -1,15 +1,14 @@
 use detaxine_ui::components::actions::button::BasicButton;
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
-use reactive_stores::Store;
 
-use crate::data::context::store::{AppStateContext, AppStateContextStoreFields};
+use crate::data::context::ui::use_ui;
 
 #[component]
 pub fn NotFound() -> impl IntoView {
     let navigate = use_navigate();
     let navigate_404 = navigate.clone();
-    let store = expect_context::<Store<AppStateContext>>();
+    let ui_ctx = use_ui();
 
     view! {
         <div class="min-h-svh bg-contrast-white dark:bg-navy flex items-center justify-center px-4">
@@ -27,7 +26,9 @@ pub fn NotFound() -> impl IntoView {
                     <BasicButton
                         style_ext="text-sm px-4 py-2 rounded-[5px] border border-gray/20 dark:border-mid-gray/30 text-gray dark:text-mid-gray hover:bg-gray/5 dark:hover:bg-mid-gray/10 transition-colors"
                         on:click=move |_| {
-                            store.redirect_to().get().map(|route| navigate_404(&route, Default::default()));
+                            if let Some(route) = ui_ctx.redirect_to.get() {
+                                navigate_404(&route, Default::default());
+                            }
                         }
                     >
                         "Go back"
@@ -48,7 +49,7 @@ pub fn NotFound() -> impl IntoView {
 pub fn InternalServerError() -> impl IntoView {
     let navigate = use_navigate();
     let navigate_500 = navigate.clone();
-    let store = expect_context::<Store<AppStateContext>>();
+    let ui_ctx = use_ui();
 
     view! {
         <div class="min-h-svh bg-contrast-white dark:bg-navy flex items-center justify-center px-4">
@@ -72,7 +73,9 @@ pub fn InternalServerError() -> impl IntoView {
                     <BasicButton
                         style_ext="text-sm px-4 py-2 rounded-[5px] bg-primary text-contrast-white hover:opacity-90 transition-opacity font-medium"
                         on:click=move |_| {
-                            store.redirect_to().get().map(|route| navigate_500(&route, Default::default()));
+                            if let Some(route) = ui_ctx.redirect_to.get() {
+                                navigate_500(&route, Default::default());
+                            }
                         }
                     >
                         "Try again"

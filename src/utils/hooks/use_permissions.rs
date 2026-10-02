@@ -1,8 +1,7 @@
-use crate::components::hocs::permission_guard::PermissionMatch;
-use crate::data::context::store::{AppStateContext, AppStateContextStoreFields};
-use crate::data::models::general::acl::{AuthInfoStoreFields, UserInfoStoreFields};
 use leptos::prelude::*;
-use reactive_stores::Store;
+
+use crate::components::hocs::permission_guard::PermissionMatch;
+use crate::data::context::auth::use_auth;
 
 /// Usage in a component
 /// ```
@@ -31,13 +30,13 @@ use reactive_stores::Store;
 /// ```
 
 pub fn use_permission(permissions: &[String], match_mode: PermissionMatch) -> Memo<bool> {
-    let store = expect_context::<Store<AppStateContext>>();
+    let auth_ctx = use_auth();
     // Clone once here at the boundary, not at every call site
     let permissions = StoredValue::new(permissions.to_vec());
     let match_mode = StoredValue::new(match_mode);
 
     Memo::new(move |_| {
-        let user_permissions = store.user().auth_info().current_role_permissions().get();
+        let user_permissions = auth_ctx.current_role_permissions.get();
         let permissions = permissions.get_value();
         match match_mode.get_value() {
             PermissionMatch::All => permissions.iter().all(|p| user_permissions.contains(p)),
