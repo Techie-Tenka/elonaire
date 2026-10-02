@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use detaxine_ui::{
     components::{
         actions::button::{BasicButton, ButtonType},
@@ -24,52 +22,50 @@ use leptos::{ev, prelude::*};
 use leptos_icons::Icon;
 use leptos_meta::*;
 use leptos_router::components::A;
-use leptos_router::hooks::{use_location, use_params_map};
-use reactive_stores::Store;
+use leptos_router::hooks::use_params_map;
 use web_sys::{HtmlDivElement, HtmlFormElement, MouseEvent};
 
-use crate::components::molecules::blog::blog_comment::CommentReactionDetails;
-use crate::components::molecules::{
-    blog::{blog_comment::BlogComment, blog_post_metadata::BlogDetailMetadata},
-    footer::Footer,
+use crate::{
+    components::molecules::auth::auth_modal::AuthModal,
+    data::{
+        context::blog::use_blog,
+        models::graphql::shared::{
+            BlogCommentInput, BlogPost, FetchSingleBlogPostVars, ReactionType,
+        },
+    },
 };
-use crate::data::context::shared::{fetch_single_blog_post, fetch_single_user};
-use crate::data::models::graphql::acl::FetchSingleUserVars;
-use crate::data::models::graphql::shared::{
-    BlogCommentInput, BlogPost, BookmarkBlogPostResponse, BookmarkBlogPostVars,
-    CreateBlogCommentResponse, CreateBlogCommentVars, FetchSingleBlogPostVars,
-    ReactToBlogCommentResponse, ReactToBlogCommentVars, ReactToBlogPostResponse,
-    ReactToBlogPostVars, ReactionInput, ReactionType, UpdateBlogPostShareCountResponse,
-    UpdateBlogPostShareCountVars,
+use crate::{
+    components::molecules::blog::blog_comment::CommentReactionDetails, data::context::ui::use_ui,
 };
-use crate::data::{
-    context::store::{AppStateContext, AppStateContextStoreFields},
-    models::general::acl::{AuthInfoStoreFields, UserInfoStoreFields},
+use crate::{
+    components::molecules::{
+        blog::{blog_comment::BlogComment, blog_post_metadata::BlogDetailMetadata},
+        footer::Footer,
+    },
+    views::public::error_handler::ErrorHandler,
 };
-use crate::utils::errors::handle_graphql_errors;
-use crate::utils::graphql_client::perform_mutation_or_query_with_vars;
 
 const SHARED_SERVICE_API: Option<&str> = option_env!("SHARED_SERVICE_API");
 
 #[component]
 pub fn BlogPostDetail() -> impl IntoView {
+    let blog_ctx = use_blog();
+    let params = use_params_map();
+
     let menu_visible = RwSignal::new(true);
     let comments_ref = NodeRef::new();
     let comment_form_ref = NodeRef::new();
     let (comment_form_is_valid, set_comment_form_is_valid) = signal(false);
     let submit_is_disabled = Memo::new(move |_| !comment_form_is_valid.get());
-    let (is_loading, set_is_loading) = signal(false);
-    let params = use_params_map();
-    let (blog_post, set_blog_post) = signal(None);
     let success_modal_is_open = RwSignal::new(false);
     let confirm_modal_is_open = RwSignal::new(false);
-    let store = expect_context::<Store<AppStateContext>>();
     let (show_reactions, set_show_reactions) = signal(false);
     let hover_timer: StoredValue<Option<i32>> = StoredValue::new(None);
-    let location = use_location();
-    // let (selected_reaction, set_selected_reaction) = signal::<Option<ReactionType>>(None);
+    let auth_modal_is_open = RwSignal::new(false);
+
+    let blog_post = move || blog_ctx.current_blog_post;
     let selected_reaction = Memo::new(move |_| {
-        blog_post
+        blog_post()
             .get()
             .and_then(|bp: BlogPost| bp.current_user_reaction.as_ref().map(|r| r.reaction_type))
     });
@@ -84,259 +80,73 @@ pub fn BlogPostDetail() -> impl IntoView {
         (ReactionType::Angry, "😡"),
     ];
 
-    // Add scroll event listener to toggle menu visibility
     let window_scroll_listener = window_event_listener(ev::scroll, move |_| {
         if let Some(comments_el) = comments_ref.get() as Option<HtmlDivElement> {
             let rect = comments_el.get_bounding_client_rect();
             if let Ok(window_height) = window().inner_height() {
                 let window_height = window_height.as_f64().unwrap_or(0.0);
                 let is_visible = rect.top() < window_height;
-                menu_visible.set(!is_visible); // Hide when comments are in view
+                menu_visible.set(!is_visible);
             };
         }
+    });
+
+    // Fetch on mount (and whenever the slug changes).
+    Effect::new(move |_| {
+        if let Some(slug) = params.read().get("slug") {
+            blog_ctx.fetch_single_blog_post(FetchSingleBlogPostVars {
+                blog_id_or_slug: slug,
+            });
+        }
+    });
+
+    // React to successful comment creation.
+    Effect::new(move |prev: Option<u64>| {
+        let dirty = blog_ctx.comment_created_dirty.get();
+        if let Some(prev) = prev {
+            if dirty != prev {
+                if let Some(form) = comment_form_ref
+                    .get_untracked()
+                    .and_then(|el: HtmlFormElement| el.dyn_into::<HtmlFormElement>().ok())
+                {
+                    form.reset();
+                    set_comment_form_is_valid.set(false);
+                }
+                success_modal_is_open.set(true);
+            }
+        }
+        dirty
     });
 
     let handle_comment_form_submit = move |ev: ev::SubmitEvent| {
         ev.prevent_default();
         ev.stop_propagation();
-
-        // Implement logic to show form validity
-        let target = ev
+        if let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
-
-        if let Some(form) = target {
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        {
             set_comment_form_is_valid.set(form.check_validity());
-
-            if let Some(_submitter) = ev.submitter() {
-                confirm_modal_is_open.update(|status| *status = true);
+            if ev.submitter().is_some() {
+                confirm_modal_is_open.update(|s| *s = true);
             }
         }
     };
 
-    Effect::new(move || {
-        set_is_loading.set(true);
-        let slug_fn = move || params.read().get("slug");
-
-        if let Some(slug) = slug_fn() {
-            let vars = FetchSingleBlogPostVars {
-                blog_id_or_slug: slug,
-            };
-
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
-
-            spawn_local(async move {
-                let blog_post = fetch_single_blog_post(Some(&headers), vars).await;
-                let fetch_user_info_query = r#"
-                    query FetchSingleUser($userId: String!) {
-                        fetchSingleUser(userId: $userId) {
-                            data {
-                                profilePicture
-                                bio
-                                id
-                                fullName
-                                email
-                                socials {
-                                    name
-                                    url
-                                }
-                            }
-                            metadata {
-                                requestId
-                                newAccessToken
-                            }
-                        }
-                    }
-                   "#;
-
-                if let Ok(mut blog_post) = blog_post {
-                    if let Some(comments) = &mut blog_post.comments {
-                        for comment in comments {
-                            let user_id_vars = FetchSingleUserVars {
-                                user_id: comment
-                                    .author
-                                    .as_ref()
-                                    .unwrap_or(&Default::default())
-                                    .to_owned(),
-                            };
-
-                            let author_details =
-                                fetch_single_user(&user_id_vars, None, fetch_user_info_query).await;
-
-                            if let Ok(author_details) = author_details {
-                                comment.full_author_details = Some(author_details);
-                            };
-                        }
-                    };
-
-                    let user_id_vars = FetchSingleUserVars {
-                        user_id: blog_post
-                            .author
-                            .as_ref()
-                            .unwrap_or(&Default::default())
-                            .to_owned(),
-                    };
-
-                    let author_details =
-                        fetch_single_user(&user_id_vars, None, fetch_user_info_query).await;
-
-                    if let Ok(author_details) = author_details {
-                        blog_post.full_author_details = Some(author_details);
-                    };
-
-                    set_blog_post.set(Some(blog_post));
-                }
-
-                set_is_loading.set(false);
-            });
-        };
-    });
-
     let onprimary_handler = Callback::new(move |_| {
-        let redirect_to = location.pathname.get();
-        if comment_form_is_valid.get() && blog_post.get().is_some() {
-            set_is_loading.set(true);
-            spawn_local(async move {
-                let deserialized_main_form_data = deserialize_form_with_options::<BlogCommentInput>(
-                    &comment_form_ref,
-                    &Default::default(),
-                );
-
-                if deserialized_main_form_data.is_none() {
-                    set_is_loading.set(false);
-                    return;
-                }
-
-                let deserialized_main_form_data = deserialized_main_form_data.unwrap();
-
-                let input_vars = CreateBlogCommentVars {
-                    blog_comment: deserialized_main_form_data,
-                    blog_post_id: blog_post
-                        .get_untracked()
-                        .unwrap_or_default()
-                        .id
-                        .unwrap_or_default(),
-                };
-
-                let query = r#"
-                    mutation AddCommentToBlogPost($blogComment: BlogCommentInput!, $blogPostId: String!) {
-                        addCommentToBlogPost(blogComment: $blogComment, blogPostId: $blogPostId) {
-                            data {
-                                content
-                                createdAt
-                                updatedAt
-                                id
-                                replyCount
-                                author
-                            }
-                            metadata {
-                                requestId
-                                newAccessToken
-                            }
-                        }
-                    }
-                   "#;
-
-                let mut headers = HashMap::new() as HashMap<String, String>;
-                headers.insert(
-                    "Authorization".into(),
-                    format!(
-                        "Bearer {}",
-                        store.user().auth_info().token().get_untracked()
-                    ),
-                );
-
-                let Some(shared_service_api) = SHARED_SERVICE_API else {
-                    return;
-                };
-
-                let response =
-                    perform_mutation_or_query_with_vars::<
-                        CreateBlogCommentResponse,
-                        CreateBlogCommentVars,
-                    >(Some(&headers), shared_service_api, query, input_vars)
-                    .await;
-
-                match response.get_data() {
-                    Some(data) => {
-                        if let Some(form) = comment_form_ref
-                            .get_untracked()
-                            .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
-                        {
-                            form.reset();
-                            set_comment_form_is_valid.set(false);
-                        } else {
-                        }
-
-                        let mut new_comment = data
-                            .add_comment_to_blog_post
-                            .as_ref()
-                            .unwrap_or(&Default::default())
-                            .get_data();
-
-                        let user_id_vars = FetchSingleUserVars {
-                            user_id: new_comment
-                                .author
-                                .as_ref()
-                                .unwrap_or(&Default::default())
-                                .to_owned(),
-                        };
-
-                        let fetch_user_info_query = r#"
-                            query FetchSingleUser($userId: String!) {
-                                fetchSingleUser(userId: $userId) {
-                                    data {
-                                        profilePicture
-                                        bio
-                                        id
-                                        fullName
-                                        email
-                                    }
-                                    metadata {
-                                        requestId
-                                        newAccessToken
-                                    }
-                                }
-                            }
-                           "#;
-
-                        let author_details =
-                            fetch_single_user(&user_id_vars, None, fetch_user_info_query).await;
-
-                        if let Ok(author_details) = author_details {
-                            new_comment.full_author_details = Some(author_details);
-                        };
-
-                        set_blog_post.update(|prev| {
-                            if let Some(prev) = prev {
-                                prev.comments = prev.comments.as_ref().map(|c| {
-                                    let mut new_comments = c.to_vec();
-
-                                    new_comments.push(new_comment);
-                                    new_comments
-                                });
-                            };
-                        });
-
-                        set_is_loading.set(false);
-
-                        success_modal_is_open.update(|status| *status = true);
-                    }
-                    None => {
-                        let _handle_errors =
-                            handle_graphql_errors(&response, &store, Some(&redirect_to));
-                        set_is_loading.set(false);
-                    }
-                };
-            });
+        if !comment_form_is_valid.get() {
+            return;
         }
+        let Some(blog_post_id) = blog_post().get().and_then(|bp| bp.id) else {
+            return;
+        };
+        let Some(blog_comment) = deserialize_form_with_options::<BlogCommentInput>(
+            &comment_form_ref,
+            &Default::default(),
+        ) else {
+            return;
+        };
+
+        blog_ctx.create_blog_comment(blog_post_id, blog_comment);
     });
 
     let handle_scroll_to_comments = Callback::new(move |_| {
@@ -345,7 +155,6 @@ pub fn BlogPostDetail() -> impl IntoView {
         }
     });
 
-    // Clear timer helper
     let clear_timer = move || {
         if let Some(id) = hover_timer.get_value() {
             window().clear_timeout_with_handle(id);
@@ -392,174 +201,24 @@ pub fn BlogPostDetail() -> impl IntoView {
     };
 
     let handle_reaction_click = move |reaction: ReactionType| {
-        let redirect_to = location.pathname.get();
-        spawn_local(async move {
-            let input_vars = ReactToBlogPostVars {
-                reaction: ReactionInput {
-                    reaction_type: reaction,
-                },
-                blog_post_id: blog_post
-                    .get_untracked()
-                    .unwrap_or_default()
-                    .id
-                    .unwrap_or_default(),
-            };
-
-            let query = r#"
-                mutation ReactToBlogPost($reaction: ReactionInput!, $blogPostId: String!) {
-                    reactToBlogPost(reaction: $reaction, blogPostId: $blogPostId) {
-                        data {
-                            reactionType
-                            id
-                        }
-                        metadata {
-                            requestId
-                            newAccessToken
-                        }
-                    }
-                }
-               "#;
-
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
-
-            let Some(shared_service_api) = SHARED_SERVICE_API else {
-                return;
-            };
-
-            let response = perform_mutation_or_query_with_vars::<
-                ReactToBlogPostResponse,
-                ReactToBlogPostVars,
-            >(Some(&headers), shared_service_api, query, input_vars)
-            .await;
-
-            match response.get_data() {
-                Some(data) => {
-                    // increment reaction count in blog_post
-                    set_blog_post.update(|prev| {
-                        if let Some(prev) = prev {
-                            if prev.current_user_reaction.is_none() {
-                                prev.reaction_count = prev.reaction_count.map(|val| val + 1);
-                            }
-
-                            prev.current_user_reaction = Some(
-                                data.react_to_blog_post
-                                    .as_ref()
-                                    .unwrap_or(&Default::default())
-                                    .get_data(),
-                            );
-                        };
-                    });
-                    set_is_loading.set(false);
-                }
-                None => {
-                    let _handle_errors =
-                        handle_graphql_errors(&response, &store, Some(&redirect_to));
-                    set_is_loading.set(false);
-                }
-            };
-        });
+        if let Some(blog_post_id) = blog_post().get_untracked().and_then(|bp| bp.id) {
+            blog_ctx.react_to_blog_post(blog_post_id, reaction);
+        }
     };
 
     let handle_comment_reaction_click = Callback::new(move |reaction: CommentReactionDetails| {
-        let redirect_to = location.pathname.get();
-        spawn_local(async move {
-            let input_vars = ReactToBlogCommentVars {
-                reaction: ReactionInput {
-                    reaction_type: reaction.reaction_type.clone(),
-                },
-                comment_id: reaction.comment_id.clone(),
-            };
-
-            let query = r#"
-                mutation ReactToBlogComment($reaction: ReactionInput!, $commentId: String!) {
-                    reactToBlogComment(reaction: $reaction, commentId: $commentId) {
-                        data {
-                            reactionType
-                            id
-                        }
-                        metadata {
-                            requestId
-                            newAccessToken
-                        }
-                    }
-                }
-               "#;
-
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
-
-            let Some(shared_service_api) = SHARED_SERVICE_API else {
-                return;
-            };
-
-            let response = perform_mutation_or_query_with_vars::<
-                ReactToBlogCommentResponse,
-                ReactToBlogCommentVars,
-            >(Some(&headers), shared_service_api, query, input_vars)
-            .await;
-
-            match response.get_data() {
-                Some(data) => {
-                    // increment reaction count in blog_post
-                    set_blog_post.update(|prev| {
-                        if let Some(prev) = prev {
-                            if let Some(comments) = prev.comments.as_mut() {
-                                comments.iter_mut().for_each(|comment| {
-                                    if comment
-                                        .id
-                                        .as_ref()
-                                        .unwrap_or(&Default::default())
-                                        .to_owned()
-                                        == reaction.comment_id
-                                    {
-                                        comment.current_user_reaction = data
-                                            .react_to_blog_comment
-                                            .as_ref()
-                                            .map(|val| val.get_data());
-
-                                        if comment.current_user_reaction.is_none() {
-                                            comment.reaction_count =
-                                                comment.reaction_count.map(|val| val + 1);
-                                        }
-                                    }
-                                });
-                            };
-                        };
-                    });
-                    set_is_loading.set(false);
-                }
-                None => {
-                    let _handle_errors =
-                        handle_graphql_errors(&response, &store, Some(&redirect_to));
-                    set_is_loading.set(false);
-                }
-            };
-        });
+        blog_ctx.react_to_blog_comment(reaction.comment_id.clone(), reaction.reaction_type.clone());
     });
 
     let handle_share = Callback::new(move |_| {
         let url = window().location().href().unwrap_or_default();
-        let title = blog_post
+        let title = blog_post()
             .get()
             .map(|p| p.title.unwrap_or_default())
             .unwrap_or_default();
 
         let navigator = window().navigator();
 
-        // Check if Web Share API is supported
         if js_sys::Reflect::has(&navigator, &"share".into()).unwrap_or(false) {
             let share_data = web_sys::ShareData::new();
             share_data.set_url(&url);
@@ -569,67 +228,15 @@ pub fn BlogPostDetail() -> impl IntoView {
             spawn_local(async move {
                 match wasm_bindgen_futures::JsFuture::from(promise).await {
                     Ok(_) => {
-                        // User accepted the share sheet — count this
-                        let input_vars = UpdateBlogPostShareCountVars {
-                            blog_post_id: blog_post
-                                .get_untracked()
-                                .unwrap_or_default()
-                                .id
-                                .unwrap_or_default(),
-                        };
-
-                        let query = r#"
-                            mutation UpdateBlogPostShareCount($blogPostId: String!) {
-                                updateBlogPostShareCount(blogPostId: $blogPostId) {
-                                    data
-                                    metadata {
-                                        requestId
-                                        newAccessToken
-                                    }
-                                }
-                            }
-                           "#;
-
-                        let mut headers = HashMap::new() as HashMap<String, String>;
-                        headers.insert(
-                            "Authorization".into(),
-                            format!(
-                                "Bearer {}",
-                                store.user().auth_info().token().get_untracked()
-                            ),
-                        );
-
-                        let Some(shared_service_api) = SHARED_SERVICE_API else {
-                            return;
-                        };
-
-                        let response = perform_mutation_or_query_with_vars::<
-                            UpdateBlogPostShareCountResponse,
-                            UpdateBlogPostShareCountVars,
-                        >(
-                            Some(&headers), shared_service_api, query, input_vars
-                        )
-                        .await;
-
-                        match response.get_data() {
-                            Some(data) => {
-                                // increment bookmarks_count in blog_post
-                                set_blog_post.update(|prev| {
-                                    if let Some(prev) = prev {
-                                        prev.shares_count = Some(
-                                            data.update_blog_post_share_count
-                                                .as_ref()
-                                                .unwrap_or(&Default::default())
-                                                .get_data(),
-                                        );
-                                    };
-                                });
-                                set_is_loading.set(false);
-                            }
-                            None => {
-                                set_is_loading.set(false);
-                            }
-                        };
+                        // The mutation is the only request-shaped step left —
+                        // hand it to the context.
+                        if let Some(blog_post_id) = blog_ctx
+                            .current_blog_post
+                            .get_untracked()
+                            .and_then(|bp| bp.id)
+                        {
+                            blog_ctx.update_blog_post_share_count(blog_post_id);
+                        }
                     }
                     Err(err) => {
                         let name = js_sys::Reflect::get(&err, &"name".into())
@@ -639,97 +246,27 @@ pub fn BlogPostDetail() -> impl IntoView {
                         if name != "AbortError" {
                             leptos::logging::error!("Share failed: {:?}", err);
                         }
-                        // AbortError = user cancelled, don't count
                     }
                 }
             });
         } else {
-            // Fallback — copy to clipboard
-            let clipboard = navigator.clipboard();
-            let _ = clipboard.write_text(&url);
+            let _ = navigator.clipboard().write_text(&url);
         }
     });
 
     let handle_bookmark = Callback::new(move |_| {
-        let redirect_to = location.pathname.get();
-        spawn_local(async move {
-            let input_vars = BookmarkBlogPostVars {
-                blog_post_id: blog_post
-                    .get_untracked()
-                    .unwrap_or_default()
-                    .id
-                    .unwrap_or_default(),
-            };
-
-            let query = r#"
-                mutation BookmarkBlogPost($blogPostId: String!) {
-                    bookmarkBlogPost(blogPostId: $blogPostId) {
-                        data
-                        metadata {
-                            requestId
-                            newAccessToken
-                        }
-                    }
-                }
-               "#;
-
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
-
-            let Some(shared_service_api) = SHARED_SERVICE_API else {
-                return;
-            };
-
-            let response = perform_mutation_or_query_with_vars::<
-                BookmarkBlogPostResponse,
-                BookmarkBlogPostVars,
-            >(Some(&headers), shared_service_api, query, input_vars)
-            .await;
-
-            match response.get_data() {
-                Some(data) => {
-                    // increment reaction count in blog_post
-                    set_blog_post.update(|prev| {
-                        if let Some(prev) = prev {
-                            if prev.current_user_bookmarked.is_some()
-                                && !prev.current_user_bookmarked.unwrap_or_default()
-                            {
-                                prev.bookmarks_count = prev.bookmarks_count.map(|val| val + 1);
-                            } else {
-                                prev.bookmarks_count = prev.bookmarks_count.map(|val| val - 1);
-                            }
-
-                            prev.current_user_bookmarked = Some(
-                                data.bookmark_blog_post
-                                    .as_ref()
-                                    .unwrap_or(&Default::default())
-                                    .get_data(),
-                            );
-                        };
-                    });
-                    set_is_loading.set(false);
-                }
-                None => {
-                    let _handle_errors =
-                        handle_graphql_errors(&response, &store, Some(&redirect_to));
-                    set_is_loading.set(false);
-                }
-            };
-        });
+        if let Some(blog_post_id) = blog_post().get_untracked().and_then(|bp| bp.id) {
+            blog_ctx.bookmark_blog_post(blog_post_id);
+        }
     });
 
-    // Ensure removal when component goes out of scope
     on_cleanup(move || {
-        window_scroll_listener.remove(); // Explicitly detach
+        window_scroll_listener.remove();
     });
 
     view! {
+        <ErrorHandler unauthorized_cb=Callback::new(move |_| auth_modal_is_open.set(true)) />
+        <AuthModal is_open=auth_modal_is_open />
         <Title text="Blog Detail"/>
 
         <main>
@@ -744,12 +281,12 @@ pub fn BlogPostDetail() -> impl IntoView {
                     <p>"Are you sure that you want to submit?"</p>
                 </div>
             </BasicModal>
-            <Show when=move || is_loading.get()>
+            <Show when=move || blog_ctx.is_loading.get()>
                 <Spinner />
             </Show>
                 {
                     move || {
-                        let blog_post = blog_post.get();
+                        let blog_post = blog_ctx.current_blog_post.get();
                         let selected_reaction_icon = match selected_reaction.get() {
                             Some(ReactionType::Like)    => LuThumbsUp,
                             Some(ReactionType::Dislike) => LuThumbsDown,

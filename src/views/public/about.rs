@@ -1,29 +1,20 @@
+use detaxine_ui::utils::formatters::PipeOption;
 use leptos::prelude::*;
-use leptos::task::spawn_local;
 use leptos_meta::*;
-use reactive_stores::Store;
 
 use crate::components::molecules::{
     flip_card::FlipCard, headline::Headline, section_title::SectionTitle, top_nav::TopNav,
 };
-use crate::data::context::shared::fetch_services;
-use crate::data::context::store::{AppStateContext, AppStateContextStoreFields};
-use crate::data::context::users::fetch_site_owner_info;
+use crate::data::context::{portfolio::use_portfolio, site_owner::use_site_owner};
 
 #[component]
 pub fn About() -> impl IntoView {
-    let store = expect_context::<Store<AppStateContext>>();
-    let site_owner_info = move || store.site_owner_info();
-    let services = move || store.services();
-    let (is_loading, set_is_loading) = signal(false);
+    let site_owner_ctx = use_site_owner();
+    let portfolio_ctx = use_portfolio();
 
-    Effect::new(move || {
-        set_is_loading.set(true);
-        spawn_local(async move {
-            let _site_owner_info = fetch_site_owner_info(&store, None).await;
-            let _fetch_services_res = fetch_services(&store, None).await;
-            set_is_loading.set(false);
-        });
+    Effect::new(move |_| {
+        site_owner_ctx.fetch_site_owner_info();
+        portfolio_ctx.fetch_services();
     });
 
     view! {
@@ -41,12 +32,12 @@ pub fn About() -> impl IntoView {
                     </div>
                     <div class="max-w-[400px] flex flex-col gap-[20px] md:basis-1/2">
                         <div class="flex flex-col gap-[20px]">
-                            <h1>"Hello, I am "<span class="text-primary">{move || site_owner_info().get().full_name}</span></h1>
-                            <p>{move || site_owner_info().get().bio}</p>
+                            <h1>"Hello, I am "<span class="text-primary">{move || site_owner_ctx.site_owner_info.get().full_name}</span></h1>
+                            <p>{move || site_owner_ctx.site_owner_info.get().bio}</p>
                         </div>
 
                         <div class="flex flex-col gap-[20px]">
-                            <p><strong class="text-primary">"Age: "</strong>30 years</p>
+                            <p><strong class="text-primary">"Age: "</strong>{move || site_owner_ctx.site_owner_info.get().age.text(None)}</p>
                             <p><strong class="text-primary">"Country of Residence: "</strong>Kenya</p>
                             <p><strong class="text-primary">"Relocation: "</strong>Open to relocation</p>
                         </div>
@@ -57,7 +48,7 @@ pub fn About() -> impl IntoView {
                 </div>
                 <div class="display-constraints grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-[20px]">
                     {
-                        move || services()
+                        move || portfolio_ctx.services
                             .get()
                             .iter()
                             .map(|service| {

@@ -26,25 +26,14 @@ use detaxine_ui::{
 use icondata::BsPlusLg;
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
-use leptos::task::spawn_local;
 use leptos::wasm_bindgen::JsCast;
 use leptos_meta::*;
 use leptos_router::components::{A, Outlet};
-use reactive_stores::Store;
 use web_sys::HtmlFormElement;
 
-use crate::data::context::shared::fetch_professions;
-use crate::data::models::graphql::shared::{
-    CreateProfessionalDetailsResponse, ProfessionalDetailsInputVars,
-};
 use crate::data::{
-    context::store::{AppStateContext, AppStateContextStoreFields},
-    models::{
-        general::acl::{AuthInfoStoreFields, UserInfoStoreFields},
-        graphql::shared::UserProfessionalInfoInput,
-    },
+    context::portfolio::use_portfolio, models::graphql::shared::UserProfessionalInfoInput,
 };
-use crate::utils::graphql_client::perform_mutation_or_query_with_vars;
 
 const SHARED_SERVICE_API: Option<&str> = option_env!("SHARED_SERVICE_API");
 
@@ -60,9 +49,8 @@ pub fn ProfessionalDetails() -> impl IntoView {
 
 #[component]
 pub fn ProfessionalDetailsList() -> impl IntoView {
-    let store = expect_context::<Store<AppStateContext>>();
-    let professions = move || store.professions();
-    let (is_loading, set_is_loading) = signal(false);
+    let portfolio_ctx = use_portfolio();
+    let professions = move || portfolio_ctx.professions;
 
     let table_data = RwSignal::new((
         vec![
@@ -73,22 +61,8 @@ pub fn ProfessionalDetailsList() -> impl IntoView {
         vec![],
     ));
 
-    Effect::new(move || {
-        set_is_loading.set(true);
-        spawn_local(async move {
-            let mut headers = HashMap::new() as HashMap<String, String>;
-            headers.insert(
-                "Authorization".into(),
-                format!(
-                    "Bearer {}",
-                    store.user().auth_info().token().get_untracked()
-                ),
-            );
-
-            let _fetch_professions_res = fetch_professions(&store, Some(&headers)).await;
-
-            set_is_loading.set(false);
-        });
+    Effect::new(move |_| {
+        portfolio_ctx.fetch_professions();
     });
 
     Effect::new(move || {
@@ -98,8 +72,6 @@ pub fn ProfessionalDetailsList() -> impl IntoView {
             .map(|profession| {
                 let mut hash_map_data = HashMap::new();
 
-                // This id is the unique identifier of the table row. and is a MUST for the table to function properly.
-                // *Note:* The id is a MUST for the table to function properly. You might be forced to generate a unique id for each row if your data does not have a unique identifier.
                 hash_map_data.insert(
                     "id".to_string(),
                     TableCellData::String(
@@ -110,7 +82,6 @@ pub fn ProfessionalDetailsList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Occupation".to_string(),
                     TableCellData::String(
@@ -125,15 +96,11 @@ pub fn ProfessionalDetailsList() -> impl IntoView {
                 let status = if profession.active.is_some() && profession.active.unwrap_or_default()
                 {
                     ViewFn::from(move || {
-                        view! {
-                            <LabelTag label="Active" color=ColorTemperature::Success />
-                        }
+                        view! { <LabelTag label="Active" color=ColorTemperature::Success /> }
                     })
                 } else {
                     ViewFn::from(move || {
-                        view! {
-                            <LabelTag label="Inactive" color=ColorTemperature::Warning />
-                        }
+                        view! { <LabelTag label="Inactive" color=ColorTemperature::Warning /> }
                     })
                 };
                 hash_map_data.insert("Status".to_string(), TableCellData::Html(status));
@@ -163,7 +130,7 @@ pub fn ProfessionalDetailsList() -> impl IntoView {
             <div class="display-constraints">
                 <Breadcrumbs custom_route_names=["Home", "Dashboard", "Professions"] />
             </div>
-            <Show when=move || is_loading.get()>
+            <Show when=move || portfolio_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 
@@ -193,108 +160,55 @@ pub fn CreateProfessionalDetail() -> impl IntoView {
     let form_ref = NodeRef::new();
     let (form_is_valid, set_form_is_valid) = signal(false);
     let submit_is_disabled = Memo::new(move |_| !form_is_valid.get());
-    let store = expect_context::<Store<AppStateContext>>();
+    let portfolio_ctx = use_portfolio();
     let success_modal_is_open = RwSignal::new(false);
     let confirm_modal_is_open = RwSignal::new(false);
-    let (is_loading, set_is_loading) = signal(false);
+
+    // React to successful creation — same shape as the ACL create views.
+    Effect::new(move |prev: Option<u64>| {
+        let dirty = portfolio_ctx.professional_details_created_dirty.get();
+        if let Some(prev) = prev {
+            if dirty != prev {
+                if let Some(form) = form_ref
+                    .get_untracked()
+                    .and_then(|el: HtmlFormElement| el.dyn_into::<HtmlFormElement>().ok())
+                {
+                    form.reset();
+                    set_form_is_valid.set(false);
+                }
+                success_modal_is_open.set(true);
+            }
+        }
+        dirty
+    });
 
     let onprimary_handler = Callback::new(move |_| {
-        if form_is_valid.get() {
-            set_is_loading.set(true);
-            spawn_local(async move {
-                let deserialized_form_data =
-                    deserialize_form_with_options::<UserProfessionalInfoInput>(
-                        &form_ref,
-                        &FormDeserializeOptions {
-                            deserialize_bool: true,
-                            ..Default::default()
-                        },
-                    );
-
-                if deserialized_form_data.is_none() {
-                    set_is_loading.set(false);
-                    return;
-                }
-
-                let deserialized_form_data = deserialized_form_data.unwrap();
-
-                let input_vars = ProfessionalDetailsInputVars {
-                    professional_details: deserialized_form_data,
-                };
-
-                let query = r#"
-                       mutation CreateProfessionalDetails($professionalDetails: UserProfessionalInfoInput!) {
-                            createProfessionalDetails(professionalDetails: $professionalDetails) {
-                                data {
-                                    description
-                                    active
-                                    occupation
-                                    startDate
-                                    id
-                                }
-                                metadata {
-                                    newAccessToken
-                                    requestId
-                                }
-                            }
-                       }
-                   "#;
-
-                let mut headers = HashMap::new() as HashMap<String, String>;
-                headers.insert(
-                    "Authorization".into(),
-                    format!(
-                        "Bearer {}",
-                        store.user().auth_info().token().get_untracked()
-                    ),
-                );
-
-                let Some(shared_service_api) = SHARED_SERVICE_API else {
-                    return;
-                };
-
-                let response =
-                    perform_mutation_or_query_with_vars::<
-                        CreateProfessionalDetailsResponse,
-                        ProfessionalDetailsInputVars,
-                    >(Some(&headers), shared_service_api, query, input_vars)
-                    .await;
-
-                match response.get_data() {
-                    Some(_data) => {
-                        if let Some(form) = form_ref
-                            .get_untracked()
-                            .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
-                        {
-                            form.reset();
-                            set_form_is_valid.set(false);
-                        } else {
-                        }
-                        set_is_loading.set(false);
-
-                        success_modal_is_open.update(|status| *status = true);
-                    }
-                    None => {
-                        set_is_loading.set(false);
-                    }
-                };
-            });
+        if !form_is_valid.get() {
+            return;
         }
+
+        let Some(input) = deserialize_form_with_options::<UserProfessionalInfoInput>(
+            &form_ref,
+            &FormDeserializeOptions {
+                deserialize_bool: true,
+                ..Default::default()
+            },
+        ) else {
+            return;
+        };
+
+        portfolio_ctx.create_professional_details(input);
     });
 
     let handle_step_form_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         ev.stop_propagation();
-
-        // Implement logic to show form validity
-        let target = ev
+        if let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
-
-        if let Some(form) = target {
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        {
             set_form_is_valid.set(form.check_validity());
-
-            if let Some(_submitter) = ev.submitter() {
+            if ev.submitter().is_some() {
                 confirm_modal_is_open.update(|status| *status = true);
             }
         }
@@ -313,7 +227,7 @@ pub fn CreateProfessionalDetail() -> impl IntoView {
                     <p>"Are you sure that you want to submit?"</p>
                 </div>
             </BasicModal>
-            <Show when=move || is_loading.get()>
+            <Show when=move || portfolio_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 

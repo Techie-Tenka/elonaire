@@ -1,20 +1,19 @@
 use detaxine_ui::stacks::z_stack::provide_z_stack;
-use leptos::{prelude::*, task::spawn_local};
+use leptos::prelude::*;
 use leptos_meta::*;
 use leptos_router::{
     StaticSegment,
     components::{ParentRoute, Route, Router, Routes},
     path,
 };
-use reactive_stores::Store;
 
 use crate::{
     components::{hocs::protected_route::ProtectedRoute, molecules::cookie_banner::CookieBanner},
-    data::{
-        context::store::{AppStateContext, AppStateContextStoreFields},
-        models::general::acl::{AuthInfoStoreFields, UserInfoStoreFields},
+    data::context::{
+        acl::provide_acl, auth::provide_auth, billing::provide_billing, blog::provide_blog,
+        portfolio::provide_portfolio, shared::provide_shared, site_owner::provide_site_owner,
+        ui::provide_ui, user::provide_user,
     },
-    utils::auth::check_auth_and_update_store_auth_info,
     views::{
         dashboard::{
             blog::{Blog, BlogList, CreateBlog},
@@ -64,19 +63,41 @@ use crate::{
 
 #[component]
 pub fn App() -> impl IntoView {
-    provide_context(Store::new(AppStateContext::default()));
+    // ── Context wiring ────────────────────────────────────────────────
+    // Each `provide_*()` returns its own context by value (all contexts
+    // are `Copy`), so downstream providers can take a `&` to a dep and
+    // store a copy without any lifetime or ownership gymnastics.
+    let ui = provide_ui();
+
+    let auth = provide_auth(ui);
+
+    let user = provide_user(ui, auth);
+    let site_owner = provide_site_owner(ui, auth);
+    let acl = provide_acl(ui, auth);
+    let portfolio = provide_portfolio(ui, auth);
+    let billing = provide_billing(ui, auth);
+    let blog = provide_blog(ui, user, auth);
+    provide_shared(ui, auth);
+
+    // The `provide_*()` side effect (stashing into the context map) is what
+    // matters. Silence unused-variable warnings for the ones App itself
+    // doesn't reference.
+    let _ = (site_owner, acl, portfolio, billing, blog);
+
     provide_meta_context();
     provide_z_stack();
-    let store = expect_context::<Store<AppStateContext>>();
 
-    // Effect to refresh user auth status
+    // ── Auth bootstrap ────────────────────────────────────────────────
+    // `auth` is captured by value into the closure (Copy). Reading the
+    // token here is safe because App's owner already ran `provide_auth`.
+    // The gate on empty-token preserves the original behaviour of not
+    // firing checkAuth on a fresh, unauthenticated load.
     Effect::new(move |_| {
-        let store = store.clone();
-        spawn_local(async move {
-            let token = store.user().auth_info().token().get_untracked();
-
-            check_auth_and_update_store_auth_info(&token, &store).await;
-        });
+        // calls into `AuthContext::authenticate_with_token` →
+        // `UserContext::fetch_own_profile_by_id` via the context's own
+        // user_id watcher (or the util, if you kept it).
+        auth.authenticate_with_token();
+        user.fetch_own_profile();
     });
 
     view! {

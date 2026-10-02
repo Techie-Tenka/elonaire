@@ -1,30 +1,24 @@
 use crate::{
     data::{
-        context::store::{AppStateContext, AppStateContextStoreFields},
-        models::{
-            general::acl::{AuthInfoStoreFields, UserInfoStoreFields},
-            general::shared::RestResponse,
-        },
+        context::{auth::AuthContext, ui::UiContext},
+        models::general::shared::RestResponse,
     },
     utils::graphql_client::{GraphQLResponse, LocalGraphQLErrorMessage},
 };
 use leptos::prelude::*;
-use reactive_stores::Store;
 use serde::{Deserialize, Serialize};
 
 pub fn handle_graphql_errors<T>(
     response: &GraphQLResponse<T>,
-    store: &Store<AppStateContext>,
+    ui: &UiContext,
     redirect_to: Option<&str>,
-) -> () {
+) {
     let errors = response.get_error();
     errors.iter().for_each(|e| {
         if let Ok(value) = serde_json::to_value(e) {
             if let Ok(err) = serde_json::from_value(value) as Result<LocalGraphQLErrorMessage, _> {
-                store
-                    .redirect_to()
-                    .set(redirect_to.map(|link| link.to_string()));
-                store.error().set(Some(LocalErrorMessage::GraphQL(err)));
+                ui.redirect_to.set(redirect_to.map(|link| link.to_string()));
+                ui.error.set(Some(LocalErrorMessage::GraphQL(err)));
             }
         }
     });
@@ -46,6 +40,24 @@ pub struct LocalRestErrorMessage {
 pub enum LocalErrorMessage {
     GraphQL(LocalGraphQLErrorMessage),
     Rest(LocalRestErrorMessage),
+    Client(ClientErrorMessage),
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct ClientErrorMessage {
+    pub message: String,
+    pub code: String,
+}
+
+impl ClientErrorMessage {
+    pub const CODE: &'static str = "CLIENT";
+
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            code: Self::CODE.to_string(),
+        }
+    }
 }
 
 impl LocalErrorMessage {
@@ -53,45 +65,45 @@ impl LocalErrorMessage {
         match self {
             LocalErrorMessage::GraphQL(e) => &e.message,
             LocalErrorMessage::Rest(e) => &e.message,
+            LocalErrorMessage::Client(e) => &e.message,
         }
     }
 
-    pub fn code(&self) -> Option<&str> {
+    pub fn code(&self) -> &str {
         match self {
             LocalErrorMessage::GraphQL(e) => e
                 .extensions
                 .as_ref()
                 .and_then(|ext| ext.get("code"))
-                .map(String::as_str),
-            LocalErrorMessage::Rest(e) => Some(&e.code),
+                .map(String::as_str)
+                .unwrap_or(ClientErrorMessage::CODE),
+            LocalErrorMessage::Rest(e) => &e.code,
+            LocalErrorMessage::Client(e) => &e.code,
         }
     }
 
+    pub fn is_client(&self) -> bool {
+        self.code() == ClientErrorMessage::CODE
+    }
     pub fn is_unauthorized(&self) -> bool {
-        self.code().map(|c| c == "401").unwrap_or(false)
+        self.code() == "401"
     }
-
     pub fn is_not_found(&self) -> bool {
-        self.code().map(|c| c == "404").unwrap_or(false)
+        self.code() == "404"
     }
-
     pub fn is_bad_request(&self) -> bool {
-        self.code().map(|c| c == "400").unwrap_or(false)
+        self.code() == "400"
     }
-
     pub fn is_forbidden(&self) -> bool {
-        self.code().map(|c| c == "403").unwrap_or(false)
+        self.code() == "403"
     }
-
     pub fn is_unprocessable(&self) -> bool {
-        self.code().map(|c| c == "422").unwrap_or(false)
+        self.code() == "422"
     }
-
     pub fn is_internal(&self) -> bool {
-        self.code().map(|c| c == "500").unwrap_or(false)
+        self.code() == "500"
     }
 
-    /// Parse a REST error response from a raw JSON string
     pub fn from_rest_json(json: &str) -> Option<Self> {
         serde_json::from_str::<LocalRestErrorBody>(json)
             .ok()
@@ -99,9 +111,22 @@ impl LocalErrorMessage {
     }
 }
 
+impl From<&str> for LocalErrorMessage {
+    fn from(s: &str) -> Self {
+        LocalErrorMessage::Client(ClientErrorMessage::new(s))
+    }
+}
+
+impl From<String> for LocalErrorMessage {
+    fn from(s: String) -> Self {
+        LocalErrorMessage::Client(ClientErrorMessage::new(s))
+    }
+}
+
 pub fn unwrap_rest_response<T>(
     body: RestResponse<T>,
-    store: &Store<AppStateContext>,
+    ui: &UiContext,
+    auth: &AuthContext,
     redirect_to: Option<&str>,
 ) -> Option<T> {
     if !body.success {
@@ -111,15 +136,14 @@ pub fn unwrap_rest_response<T>(
                 message: "An unknown error occurred".into(),
             })
         });
-        store
-            .redirect_to()
-            .set(redirect_to.map(|link| link.to_string()));
-        store.error().set(Some(error));
+        ui.redirect_to.set(redirect_to.map(|link| link.to_string()));
+        ui.error.set(Some(error));
         return None;
     }
-    match body.metadata.new_access_token {
-        Some(token) => store.user().auth_info().token().set(token),
-        None => {}
-    };
+    if let Some(metadata) = body.metadata {
+        if let Some(token) = metadata.new_access_token {
+            auth.token.set(Some(token));
+        }
+    }
     body.data
 }

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use icondata::{
     BsInfoCircle, BsMoon, BsPower, BsRss, BsSearch, BsSun, CgMenuLeft,
     MdiCardAccountDetailsOutline, MdiCertificateOutline, MdiStore, MdiTabletDashboard,
@@ -8,24 +6,15 @@ use icondata::{
 use leptos::ev;
 use leptos::prelude::*;
 use leptos_icons::Icon;
-use leptos_router::hooks::use_location;
-use leptos_router::hooks::use_navigate;
-use reactive_stores::Store;
-
 use leptos_router::components::A;
-use wasm_bindgen_futures::spawn_local;
+use leptos_router::hooks::{use_location, use_navigate};
 
 use detaxine_ui::components::{
     actions::button::BasicButton, feedback::popover::Popover, forms::toggle_switch::ToggleSwitch,
 };
 
-use crate::components::hocs::permission_guard::PermissionGuard;
-use crate::components::hocs::permission_guard::PermissionMatch;
-use crate::data::context::users::sign_out;
-use crate::data::{
-    context::store::{AppStateContext, AppStateContextStoreFields},
-    models::general::acl::{AuthInfoStoreFields, UserInfoStoreFields},
-};
+use crate::components::hocs::permission_guard::{PermissionGuard, PermissionMatch};
+use crate::data::context::{auth::use_auth, ui::use_ui, user::use_user};
 use crate::views::dashboard::layout::MenuItem;
 
 #[component]
@@ -34,6 +23,14 @@ pub fn Nav(
 ) -> impl IntoView {
     let location = use_location();
     let showing_user_popover = RwSignal::new(false);
+    let navigate = use_navigate();
+
+    let user_ctx = use_user();
+    let auth_ctx = use_auth();
+    let ui_ctx = use_ui();
+
+    let user_profile = user_ctx.user_profile;
+    let dark_mode_is_active = ui_ctx.dark_mode_is_active;
 
     let is_dashboard = Memo::new(move |_| location.pathname.get().contains("/dashboard"));
     let is_blog = Memo::new(move |_| location.pathname.get().contains("/blog"));
@@ -51,45 +48,29 @@ pub fn Nav(
 
     let blog_menu_items = Memo::new(move |_| {
         vec![
-            // MenuItem::new("Home", AiHomeOutlined, ""),
             MenuItem::new("Blog Feed", BsRss, "/blog", vec![]),
             MenuItem::new("About", BsInfoCircle, "/blog/about", vec![]),
-            // MenuItem::new("Categories", BsFilter, "/blog/categories"),
-            // MenuItem::new("Pricing", BsCashCoin, "/blog/pricing"),
-            // MenuItem::new("Contact", BiContactSolid, "/blog/contact"),
         ]
     });
 
-    let store = expect_context::<Store<AppStateContext>>();
-    let user_profile = store.user().user_profile();
-    let dark_mode_is_active = store.dark_mode_is_active();
-    let navigate = use_navigate();
-    // To this — so it only tracks one signal:
-    let token = store.user().auth_info().token();
-    let is_authenticated = Memo::new(move |_| {
-        let t = token.get();
-        !t.is_empty()
-    });
-
+    // Trigger sign-out — the context handles the rest.
     let handle_sign_out = Callback::new(move |_| {
-        let navigate = navigate.clone();
-        let mut headers = HashMap::new() as HashMap<String, String>;
-        headers.insert(
-            "Authorization".into(),
-            format!(
-                "Bearer {}",
-                store.user().auth_info().token().get_untracked()
-            ),
-        );
-
-        spawn_local(async move {
-            if let Ok(_) = sign_out(Some(&headers)).await {
-                store.user().set(Default::default());
-                navigate("/sign-in", Default::default());
-            };
-        });
+        auth_ctx.sign_out();
     });
 
+    // React to successful sign-out: clear the user profile context and navigate.
+    Effect::new(move |prev: Option<u64>| {
+        let dirty = auth_ctx.signed_out_dirty.get();
+        if let Some(prev) = prev {
+            if dirty != prev {
+                user_ctx.clear();
+                navigate("/sign-in", Default::default());
+            }
+        }
+        dirty
+    });
+
+    // Dark-mode class toggle — pure DOM side effect, stays in the view.
     Effect::new(move |_| {
         if let Some(doc) = document().document_element() {
             let class_list = doc.class_list();
@@ -188,19 +169,19 @@ pub fn Nav(
                     {move || is_blog_home.get().then(|| view! {
                         <span
                             class="flex md:hidden items-center cursor-pointer"
-                            on:click=move |_| store.show_mobile_search().set(true)
+                            on:click=move |_| ui_ctx.show_mobile_search.set(true)
                         >
                             <Icon width="16" height="16" icon=BsSearch />
                         </span>
                     })}
 
-                    // Sign in — dashboard or blog, no profile pic
+                    // Sign in — blog page, not authenticated
                     {move || {
-                        let is_authenticated = is_authenticated.get();
+                        let is_authenticated = auth_ctx.is_authenticated().get();
                         let on_blog_page = is_blog.get();
                         let is_dashboard = is_dashboard.get();
 
-                        ((on_blog_page && !is_authenticated && !is_dashboard)).then(|| view! {
+                        (on_blog_page && !is_authenticated && !is_dashboard).then(|| view! {
                             <A
                                 attr:class="hidden md:flex py-2 px-4 cursor-pointer rounded-[5px] border-2 border-primary text-primary hover:bg-primary hover:text-contrast-white font-bold text-sm"
                                 href="/sign-in"
@@ -213,8 +194,9 @@ pub fn Nav(
                     // Profile pic + popover — dashboard or blog, has profile pic
                     {move || {
                         let profile_pic = user_profile.get().profile_picture;
-                        let is_authenticated = is_authenticated.get();
-                        (((is_dashboard.get() || is_blog.get()) && is_authenticated)).then(|| {
+                        let is_authenticated = auth_ctx.is_authenticated().get();
+                        // let is_authenticated = is_authenticated.get();
+                        ((is_dashboard.get() || is_blog.get()) && is_authenticated).then(|| {
                             profile_pic.map(|pic| view! {
                                 <Popover
                                     showing=showing_user_popover

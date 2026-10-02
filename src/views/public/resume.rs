@@ -5,17 +5,13 @@ use detaxine_ui::{
     },
     utils::{formatters::PipeOption, time::convert_date_to_human_readable_format},
 };
-use leptos::{prelude::*, task::spawn_local};
+use leptos::prelude::*;
 use leptos_meta::*;
-use reactive_stores::Store;
 
 use crate::{
     components::molecules::{headline::Headline, section_title::SectionTitle, top_nav::TopNav},
     data::{
-        context::{
-            shared::{fetch_resume, fetch_skills},
-            store::{AppStateContext, AppStateContextStoreFields},
-        },
+        context::portfolio::use_portfolio,
         models::graphql::shared::{
             UserResume, UserResumeSection, UserSkill, UserSkillLevel, UserSkillType,
         },
@@ -24,19 +20,13 @@ use crate::{
 
 #[component]
 pub fn Resume() -> impl IntoView {
-    let store = expect_context::<Store<AppStateContext>>();
-    let resume = move || store.resume();
-    let skills = move || store.skills();
-    let (is_loading, set_is_loading) = signal(false);
+    let portfolio_ctx = use_portfolio();
+    let resume = move || portfolio_ctx.resume;
+    let skills = move || portfolio_ctx.skills;
 
-    Effect::new(move || {
-        set_is_loading.set(true);
-        spawn_local(async move {
-            let _fetch_resume_res = fetch_resume(&store, None).await;
-            let _fetch_skills_res = fetch_skills(&store, None).await;
-
-            set_is_loading.set(false);
-        });
+    Effect::new(move |_| {
+        portfolio_ctx.fetch_resume();
+        portfolio_ctx.fetch_skills();
     });
 
     view! {
@@ -56,7 +46,7 @@ pub fn Resume() -> impl IntoView {
                                     .get()
                                     .iter()
                                     .filter(|resume| resume.section.as_ref() == Some(&UserResumeSection::Education))
-                                    .map(|resume| generate_timeline_item(resume))
+                                    .map(generate_timeline_item)
                                     .collect::<Vec<TimelineItem>>());
 
                                 view! {
@@ -73,7 +63,7 @@ pub fn Resume() -> impl IntoView {
                                     .get()
                                     .iter()
                                     .filter(|resume| resume.section.as_ref() == Some(&UserResumeSection::Experience))
-                                    .map(|resume| generate_timeline_item(resume))
+                                    .map(generate_timeline_item)
                                     .collect::<Vec<TimelineItem>>());
 
                                 view! {
@@ -92,10 +82,10 @@ pub fn Resume() -> impl IntoView {
                                     .get()
                                     .iter()
                                     .filter(|skill| skill.skill_type.as_ref() == Some(&UserSkillType::Technical))
-                                    .map(|skill| generate_panel_info(skill))
+                                    .map(generate_panel_info)
                                     .collect::<Vec<PanelInfo>>());
 
-                                view!{
+                                view! {
                                     <Collapse is_accordion=true panel_items=technical_skills />
                                 }
                             }
@@ -109,10 +99,10 @@ pub fn Resume() -> impl IntoView {
                                     .get()
                                     .iter()
                                     .filter(|skill| skill.skill_type.as_ref() == Some(&UserSkillType::Soft))
-                                    .map(|skill| generate_panel_info(skill))
+                                    .map(generate_panel_info)
                                     .collect::<Vec<PanelInfo>>());
 
-                                view!{
+                                view! {
                                     <Collapse is_accordion=true panel_items=soft_skills />
                                 }
                             }
@@ -125,7 +115,7 @@ pub fn Resume() -> impl IntoView {
     .into_any()
 }
 
-/// utility function to generate resume timeline items
+/// Utility function to generate resume timeline items.
 fn generate_timeline_item(resume: &UserResume) -> TimelineItem {
     let start_date = convert_date_to_human_readable_format(
         resume.start_date.as_ref().unwrap_or(&Default::default()),
@@ -175,7 +165,7 @@ fn generate_timeline_item(resume: &UserResume) -> TimelineItem {
     }
 }
 
-/// A utility function to generate UserSkill panelinfo
+/// A utility function to generate a `UserSkill` `PanelInfo`.
 fn generate_panel_info(skill: &UserSkill) -> PanelInfo {
     let skill = skill.clone();
 

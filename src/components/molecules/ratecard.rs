@@ -1,17 +1,11 @@
-use crate::data::models::general::shared::RestResponse;
-use crate::utils::errors::{handle_graphql_errors, unwrap_rest_response};
-use crate::views::public::error_handler::ErrorHandler;
-use std::collections::HashMap;
-
 use chrono::Local;
 use icondata::{AiFilePdfOutlined, AiReadOutlined, BsArrowRight, MdiFileDocumentEditOutline};
+use leptos::ev::{self, SubmitEvent};
 use leptos::html::Form;
-use leptos::task::spawn_local;
+use leptos::prelude::*;
 use leptos::wasm_bindgen::JsCast;
-use leptos::{ev, prelude::*};
 use leptos_router::hooks::use_location;
-use reactive_stores::Store;
-use web_sys::{FormData, HtmlFormElement, HtmlInputElement, HtmlSelectElement, SubmitEvent};
+use web_sys::{HtmlFormElement, HtmlInputElement, HtmlSelectElement};
 
 use detaxine_ui::{
     components::{
@@ -36,22 +30,16 @@ use detaxine_ui::{
     },
 };
 
-use crate::data::context::shared::fetch_billing_rate;
-use crate::data::context::store::{AppStateContext, AppStateContextStoreFields};
-use crate::data::models::general::{
-    acl::{AuthInfoStoreFields, UserInfoStoreFields},
-    files::UploadedFileResponse,
-};
-use crate::data::models::graphql::shared::{
-    BillingInterval, BillingIntervalForm, CreateServiceRequestResponse, CreateServiceRequestVars,
-    FetchBillingRateVars, ServiceIdsForm, ServiceRequestInput, ServiceRequestInputMetadata,
-    UserService,
+use crate::components::molecules::auth::auth_modal::AuthModal;
+use crate::data::{
+    context::{auth::use_auth, billing::use_billing},
+    models::graphql::shared::{
+        BillingInterval, BillingIntervalForm, FetchBillingRateVars, ServiceIdsForm,
+        ServiceRequestInput, UserService,
+    },
 };
 use crate::utils::custom_traits::EnumerableEnum;
-use crate::utils::graphql_client::perform_mutation_or_query_with_vars;
-
-const FILES_SERVICE_API: Option<&str> = option_env!("FILES_SERVICE_API");
-const SHARED_SERVICE_API: Option<&str> = option_env!("SHARED_SERVICE_API");
+use crate::views::public::error_handler::ErrorHandler;
 
 #[component]
 pub fn RatecardComponent(
@@ -64,31 +52,28 @@ pub fn RatecardComponent(
     let file_input_ref = NodeRef::new();
     let (services_form_is_valid, set_services_form_is_valid) = signal(false);
     let (billing_interval_form_is_valid, set_billing_interval_form_is_valid) = signal(false);
-    let (amount, set_amount) = signal(None as Option<f64>);
     let submit_is_disabled =
         Memo::new(move |_| !services_form_is_valid.get() || !billing_interval_form_is_valid.get());
     let location = use_location();
+    let billing_ctx = use_billing();
 
     let success_modal_is_open = RwSignal::new(false);
     let service_request_modal_is_open = RwSignal::new(false);
     let confirm_modal_is_open = RwSignal::new(false);
-    let (is_loading, set_is_loading) = signal(false);
-    let store = expect_context::<Store<AppStateContext>>();
+    let auth_modal_is_open = RwSignal::new(false);
 
     let stepper_form_refs = RwSignal::new(Vec::new());
 
     let modal_primary_is_disabled = Memo::new(move |_| {
         let refs = stepper_form_refs.get();
-
         if refs.is_empty() {
             return true;
         }
-
         refs.iter().any(|form_ref: &NodeRef<Form>| {
             form_ref
                 .get()
                 .map(|form| !form.check_validity())
-                .unwrap_or(true) // if form ref not yet mounted, treat as invalid
+                .unwrap_or(true)
         })
     });
 
@@ -109,57 +94,78 @@ pub fn RatecardComponent(
     );
     let (selected_billing_interval, set_selected_billing_interval) = signal("hr");
 
-    Effect::new(move || {
-        let target: Option<HtmlFormElement> = billing_interval_form_ref.get();
+    // Each card owns its own billing rate. Prevents the shared-signal
+    // bug where every mounted RatecardComponent displayed the amount
+    // from whichever card most recently triggered a fetch.
+    let local_billing_rate = RwSignal::new(None::<String>);
 
-        if let Some(form) = target {
+    let amount = Memo::new(move |_| local_billing_rate.get().and_then(|s| s.parse::<f64>().ok()));
+
+    // Owned by the component, not the effect run — otherwise the callback's
+    // StoredValue gets disposed when the effect re-runs, and the in-flight
+    // async task panics when it calls .run() on the disposed handle.
+    let on_billing_rate = Callback::new(move |result: Option<String>| {
+        local_billing_rate.set(result);
+    });
+
+    // Fire the billing-rate query whenever both forms become valid.
+    Effect::new(move |_| {
+        if let Some(form) = billing_interval_form_ref.get() as Option<HtmlFormElement> {
             set_billing_interval_form_is_valid.set(form.check_validity());
         }
 
-        if services_form_is_valid.get() && billing_interval_form_is_valid.get() {
-            spawn_local(async move {
-                let deserialized_billing_interval_form_data =
-                    deserialize_form_with_options::<BillingIntervalForm>(
-                        &billing_interval_form_ref,
-                        &Default::default(),
-                    );
-                let deserialized_services_form_data = deserialize_form_with_options::<ServiceIdsForm>(
-                    &services_form_ref,
-                    &FormDeserializeOptions {
-                        vec_fields: Some(&["service_ids"]),
-                        ..Default::default()
-                    },
-                );
+        if !(services_form_is_valid.get() && billing_interval_form_is_valid.get()) {
+            return;
+        }
 
-                if let Some(billing_interval) = deserialized_billing_interval_form_data {
-                    if let Some(services) = deserialized_services_form_data {
-                        let vars = FetchBillingRateVars {
-                            billing_interval: billing_interval.billing_interval,
-                            service_ids: services.service_ids,
-                        };
-
-                        let billing_rate = fetch_billing_rate(vars, None, &store).await;
-
-                        if let Ok(amount_str) = billing_rate {
-                            // Process ratecards data here
-                            set_amount.set(Some(amount_str.parse().unwrap_or(0.0)));
-                        }
-                    };
-                };
-            });
+        let Some(billing_data) = deserialize_form_with_options::<BillingIntervalForm>(
+            &billing_interval_form_ref,
+            &Default::default(),
+        ) else {
+            return;
         };
+        let Some(services_data) = deserialize_form_with_options::<ServiceIdsForm>(
+            &services_form_ref,
+            &FormDeserializeOptions {
+                vec_fields: Some(&["service_ids"]),
+                ..Default::default()
+            },
+        ) else {
+            return;
+        };
+
+        let vars = FetchBillingRateVars {
+            billing_interval: billing_data.billing_interval,
+            service_ids: services_data.service_ids,
+        };
+
+        billing_ctx.fetch_billing_rate(vars, on_billing_rate);
+    });
+
+    // React to successful service-request creation.
+    Effect::new(move |prev: Option<u64>| {
+        let dirty = billing_ctx.service_request_created_dirty.get();
+        if let Some(prev) = prev {
+            if dirty != prev {
+                if let Some(form_ref) = stepper_form_refs.get_untracked().first() {
+                    if let Some(form) = form_ref.get() {
+                        form.reset();
+                    }
+                }
+                success_modal_is_open.set(true);
+                service_request_modal_is_open.set(false);
+            }
+        }
+        dirty
     });
 
     let handle_services_form_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         ev.stop_propagation();
-
-        // Implement logic to show form validity
-        let target = ev
+        if let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
-
-        if let Some(form) = target {
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        {
             set_services_form_is_valid.set(form.check_validity());
         }
     };
@@ -167,13 +173,10 @@ pub fn RatecardComponent(
     let handle_billing_interval_form_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         ev.stop_propagation();
-
-        // Implement logic to show form validity
-        let target = ev
+        if let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
-
-        if let Some(form) = target {
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        {
             set_billing_interval_form_is_valid.set(form.check_validity());
         }
     };
@@ -183,191 +186,56 @@ pub fn RatecardComponent(
     });
 
     let onprimary_confirm_handler = Callback::new(move |_| {
-        if !modal_primary_is_disabled.get() {
-            set_is_loading.set(true);
-            let redirect_to = location.pathname.get();
-
-            if let Some(file_input) = file_input_ref.to_owned().get() as Option<HtmlInputElement> {
-                if let Ok(files_form_data) = FormData::new() {
-                    if let Some(filelist) = file_input.files() {
-                        for i in 0..filelist.length() {
-                            if let Some(file) = filelist.item(i) {
-                                if let Err(e) = files_form_data.append_with_blob("file", &file) {
-                                    leptos::logging::error!("Failed to append Blob: {:?}", e);
-                                };
-                            }
-                        }
-                    }
-
-                    let Some(files_service_api) = FILES_SERVICE_API else {
-                        return;
-                    };
-
-                    spawn_local(async move {
-                        let Ok(request) = gloo_net::http::Request::post(&format!(
-                            "{files_service_api}/upload/default"
-                        ))
-                        .header(
-                            "Authorization",
-                            format!(
-                                "Bearer {}",
-                                store.user().auth_info().token().get_untracked()
-                            )
-                            .as_str(),
-                        )
-                        .body(files_form_data) else {
-                            set_is_loading.set(false);
-                            return;
-                        };
-
-                        let body = match request.send().await {
-                            Ok(r) => r,
-                            Err(err) => {
-                                leptos::logging::error!("Failed to upload files: {:?}", err);
-                                set_is_loading.set(false);
-                                return;
-                            }
-                        };
-
-                        let body =
-                            match body.json::<RestResponse<Vec<UploadedFileResponse>>>().await {
-                                Ok(b) => b,
-                                Err(err) => {
-                                    leptos::logging::error!(
-                                        "Failed to parse upload response: {:?}",
-                                        err
-                                    );
-                                    set_is_loading.set(false);
-                                    return;
-                                }
-                            };
-
-                        let Some(uploaded_files) =
-                            unwrap_rest_response(body, &store, Some(&redirect_to))
-                        else {
-                            set_is_loading.set(false);
-                            return;
-                        };
-
-                        let Some(service_request_form_ref) =
-                            stepper_form_refs.get_untracked().first().cloned()
-                        else {
-                            set_is_loading.set(false);
-                            return;
-                        };
-
-                        let Some(deserialized_services_form_data) =
-                            deserialize_form_with_options::<ServiceIdsForm>(
-                                &services_form_ref,
-                                &FormDeserializeOptions {
-                                    vec_fields: Some(&["service_ids"]),
-                                    ..Default::default()
-                                },
-                            )
-                        else {
-                            set_is_loading.set(false);
-                            return;
-                        };
-
-                        let (
-                            Some(deserialized_service_request_form_data),
-                            Some(deserialized_service_request_metadata_form_data),
-                        ) = (
-                            deserialize_form_with_options::<ServiceRequestInput>(
-                                &service_request_form_ref,
-                                &Default::default(),
-                            ),
-                            Some(ServiceRequestInputMetadata {
-                                supporting_docs_file_ids: uploaded_files
-                                    .iter()
-                                    .map(|uploaded_file| uploaded_file.file_id.clone())
-                                    .collect(),
-                                service_ids: deserialized_services_form_data.service_ids,
-                            }),
-                        )
-                        else {
-                            set_is_loading.set(false);
-                            return;
-                        };
-
-                        let input_vars = CreateServiceRequestVars {
-                            service_request_input: deserialized_service_request_form_data,
-                            service_request_input_metadata:
-                                deserialized_service_request_metadata_form_data,
-                        };
-
-                        let query = r#"
-                        mutation CreateServiceRequest(
-                            $serviceRequestInput: ServiceRequestInput!,
-                            $serviceRequestInputMetadata: ServiceRequestInputMetadata!
-                        ) {
-                            createServiceRequest(
-                                serviceRequestInput: $serviceRequestInput,
-                                serviceRequestInputMetadata: $serviceRequestInputMetadata
-                            ) {
-                                data {
-                                    description
-                                    startDate
-                                    engagementLength
-                                    createdAt
-                                    updatedAt
-                                    id
-                                    supportingDocs {
-                                        id
-                                        fileId
-                                    }
-                                }
-                                metadata {
-                                    requestId
-                                    newAccessToken
-                                }
-                            }
-                        }
-                    "#;
-
-                        let mut headers = HashMap::new() as HashMap<String, String>;
-                        headers.insert(
-                            "Authorization".into(),
-                            format!(
-                                "Bearer {}",
-                                store.user().auth_info().token().get_untracked()
-                            ),
-                        );
-
-                        let Some(shared_service_api) = SHARED_SERVICE_API else {
-                            return;
-                        };
-
-                        let response = perform_mutation_or_query_with_vars::<
-                            CreateServiceRequestResponse,
-                            CreateServiceRequestVars,
-                        >(
-                            Some(&headers), shared_service_api, query, input_vars
-                        )
-                        .await;
-
-                        match response.get_data() {
-                            Some(_data) => {
-                                if let Some(form) = service_request_form_ref
-                                    .get_untracked()
-                                    .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
-                                {
-                                    form.reset();
-                                }
-                                set_is_loading.set(false);
-                                success_modal_is_open.update(|status| *status = true);
-                                service_request_modal_is_open.update(|status| *status = false);
-                            }
-                            None => {
-                                let _handle_errors =
-                                    handle_graphql_errors(&response, &store, Some(&redirect_to));
-                                set_is_loading.set(false);
-                            }
-                        }
-                    });
-                };
-            };
+        if modal_primary_is_disabled.get() {
+            return;
         }
+
+        let Some(file_input) = file_input_ref.get() as Option<HtmlInputElement> else {
+            return;
+        };
+
+        let mut files = Vec::new();
+        if let Some(list) = file_input.files() {
+            for i in 0..list.length() {
+                if let Some(file) = list.item(i) {
+                    files.push(file);
+                }
+            }
+        }
+
+        let Some(service_request_form_ref) = stepper_form_refs.get_untracked().first().cloned()
+        else {
+            return;
+        };
+
+        let Some(services_data) = deserialize_form_with_options::<ServiceIdsForm>(
+            &services_form_ref,
+            &FormDeserializeOptions {
+                vec_fields: Some(&["service_ids"]),
+                ..Default::default()
+            },
+        ) else {
+            return;
+        };
+
+        let Some(service_request_input) = deserialize_form_with_options::<ServiceRequestInput>(
+            &service_request_form_ref,
+            &FormDeserializeOptions {
+                numeric_fields: Some(&["engagement_length"]),
+                ..Default::default()
+            },
+        ) else {
+            return;
+        };
+
+        let redirect_to = location.pathname.get();
+
+        billing_ctx.create_service_request(
+            files,
+            service_request_input,
+            services_data.service_ids,
+            Some(redirect_to),
+        );
     });
 
     let handle_stepper_on_cleanup = Callback::new(move |_| {
@@ -375,11 +243,12 @@ pub fn RatecardComponent(
     });
 
     view! {
-        <ErrorHandler />
+        <ErrorHandler unauthorized_cb=Callback::new(move |_| auth_modal_is_open.set(true)) />
+        <AuthModal is_open=auth_modal_is_open />
         <div class="flex flex-col gap-[20px] border-[0.5px] border-light-gray rounded-[5px] min-h-[564px] max-w-[400px] flex-1">
-            <BasicModal title="Service Request" is_open=service_request_modal_is_open use_case=UseCase::General disable_auto_close=false container_style_ext="md:w-[70%] h-[70svh]" show_footer=false>
+            <BasicModal title="Service Request" is_open=service_request_modal_is_open use_case=UseCase::General disable_auto_close=false class="w-[70%] md:w-[60%] h-[70svh]" show_footer=false>
                 <>
-                <Show when=move || is_loading.get()>
+                <Show when=move || billing_ctx.is_loading.get()>
                     <Spinner />
                 </Show>
                 <Stepper step_labels=RwSignal::new(vec![StepInfo::new("Basic Information", Some(MdiFileDocumentEditOutline)), StepInfo::new("Supporting Documents", Some(AiFilePdfOutlined)), StepInfo::new("Review", Some(AiReadOutlined))]) send_all_form_refs=handle_received_form_refs is_linear=true final_button_text="Submit" ext_wrapper_styles="h-full overflow-y-auto" on_click_final_button=handle_service_request_modal_primary_click final_button_is_disabled=modal_primary_is_disabled handle_on_cleanup=handle_stepper_on_cleanup>
@@ -497,55 +366,47 @@ pub fn RatecardComponent(
                 </Stepper>
                 </>
             </BasicModal>
-                <BasicModal title="Success" is_open=success_modal_is_open use_case=UseCase::Success disable_auto_close=false>
-                    <div class="p-[10px]">
-                        <p>"Service Request submitted successfully!"</p>
-                        <p>"Elon will reach out to you shortly."</p>
-                    </div>
-                </BasicModal>
-                <BasicModal title="Confirm" on_click_primary=onprimary_confirm_handler is_open=confirm_modal_is_open use_case=UseCase::Confirmation disable_auto_close=false stack_number=1>
-                    <div class="p-[10px]">
-                        <p>"Are you sure that you want to submit?"</p>
-                    </div>
-                </BasicModal>
+            <BasicModal title="Success" is_open=success_modal_is_open use_case=UseCase::Success disable_auto_close=false>
+                <div class="p-[10px]">
+                    <p>"Service Request submitted successfully!"</p>
+                    <p>"Elon will reach out to you shortly."</p>
+                </div>
+            </BasicModal>
+            <BasicModal title="Confirm" on_click_primary=onprimary_confirm_handler is_open=confirm_modal_is_open use_case=UseCase::Confirmation disable_auto_close=false stack_number=1>
+                <div class="p-[10px]">
+                    <p>"Are you sure that you want to submit?"</p>
+                </div>
+            </BasicModal>
             <div class="border-b-[0.5px]">
                 <div class="p-[10px] flex flex-row justify-between items-center">
                     <div class="flex flex-col">
                         <h4>{move || name.get()}</h4>
-                        <p class="text-primary font-bold text-2xl"><sup class="text-sm">$</sup>{ move ||
-                            {
-                                let amount_val = amount.get();
-                                amount_val.float(Some(2), Some("_ _"))
-                            }
-                        }/{move || selected_billing_interval.get()}</p>
+                        <p class="text-primary font-bold text-2xl"><sup class="text-sm">$</sup>{ move || amount.get().float(Some(2), Some("_ _")) }/{move || selected_billing_interval.get()}</p>
                     </div>
                     <div class="basis-1/3">
                         <ReactiveForm on:submit=handle_billing_interval_form_submit form_ref=billing_interval_form_ref>
                             <SelectInput
-                            id_attr="billing_interval"
-                            name="billing_interval"
-                            options=billing_interval
-                            required=true
-                            initial_value="Hourly".to_string()
-                            ext_input_styles=""
-                            input_node_ref=billing_interval_field_ref
-                            on:change=move |ev: ev::Event| {
-                                let target = ev
-                                    .target()
-                                    .and_then(|t| t.dyn_into::<HtmlSelectElement>().ok());
-
-                                if let Some(input_el) = target {
-                                    let short_name = match input_el.value().as_str() {
-                                        "Monthly" => "mo",
-                                        "Hourly" => "hr",
-                                        "Weekly" => "wk",
-                                        "Annual" => "yr",
-                                        "Milestone" => "mi",
-                                        _ => "_ _",
-                                    };
-                                    set_selected_billing_interval.set(short_name);
+                                id_attr="billing_interval"
+                                name="billing_interval"
+                                options=billing_interval
+                                required=true
+                                initial_value="Hourly".to_string()
+                                ext_input_styles=""
+                                input_node_ref=billing_interval_field_ref
+                                on:change=move |ev: ev::Event| {
+                                    let target = ev.target().and_then(|t| t.dyn_into::<HtmlSelectElement>().ok());
+                                    if let Some(input_el) = target {
+                                        let short_name = match input_el.value().as_str() {
+                                            "Monthly" => "mo",
+                                            "Hourly" => "hr",
+                                            "Weekly" => "wk",
+                                            "Annual" => "yr",
+                                            "Milestone" => "mi",
+                                            _ => "_ _",
+                                        };
+                                        set_selected_billing_interval.set(short_name);
+                                    }
                                 }
-                            }
                             />
                         </ReactiveForm>
                     </div>
@@ -553,24 +414,23 @@ pub fn RatecardComponent(
             </div>
 
             <ReactiveForm
-            on:submit=handle_services_form_submit
-            form_ref=services_form_ref
-            on:change=move |_| {
-                if let Some(form) = services_form_ref.get() {
-                    let has_checked = form
-                        .query_selector_all("input[name='service_ids']:checked")
-                        .map(|nodes| nodes.length() > 0)
-                        .unwrap_or(false);
-
-                    set_services_form_is_valid.set(has_checked);
+                on:submit=handle_services_form_submit
+                form_ref=services_form_ref
+                on:change=move |_| {
+                    if let Some(form) = services_form_ref.get() {
+                        let has_checked = form
+                            .query_selector_all("input[name='service_ids']:checked")
+                            .map(|nodes| nodes.length() > 0)
+                            .unwrap_or(false);
+                        set_services_form_is_valid.set(has_checked);
+                    }
                 }
-            }
             >
                 <div class="p-[10px] flex flex-col gap-[10px] text-md">
                     <For
                         each=move || services.get()
                         key=|service| service.id.as_ref().unwrap_or(&String::new()).clone()
-                            children=move |service| {
+                        children=move |service| {
                             view! {
                                 <CheckboxInputField initial_value=RwSignal::new(service.id.as_ref().unwrap_or(&String::new()).clone()) label=service.title.as_ref().unwrap_or(&String::new()).clone() id_attr=format!("service-{}", service.id.as_ref().unwrap_or(&String::new()).clone()) name="service_ids" />
                             }

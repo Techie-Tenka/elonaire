@@ -7,21 +7,20 @@ use leptos::{ev, prelude::*};
 use leptos_icons::Icon;
 use leptos_meta::*;
 use leptos_router::components::{A, Outlet};
-use reactive_stores::Store;
 
 use crate::{
     components::molecules::{footer::Footer, nav::Nav},
-    data::context::store::{AppStateContext, AppStateContextStoreFields},
+    data::context::ui::use_ui,
     views::{dashboard::layout::MenuItem, public::error_handler::ErrorHandler},
 };
 
 #[component]
 pub fn MainLayout() -> impl IntoView {
-    // track collapsed state
-    let store = expect_context::<Store<AppStateContext>>();
-    let (collapsed, set_collapsed) = signal(false);
+    let ui_ctx = use_ui();
+    let dark_mode_is_active = ui_ctx.dark_mode_is_active;
 
-    let dark_mode_is_active = store.dark_mode_is_active();
+    // track collapsed state
+    let (collapsed, set_collapsed) = signal(false);
 
     let handle_menu_click =
         move || Callback::new(move |_ev: ev::MouseEvent| set_collapsed.set(true));

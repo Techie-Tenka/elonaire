@@ -1,7 +1,6 @@
-use crate::data::context::store::{AppStateContext, AppStateContextStoreFields};
-use crate::data::models::general::acl::{AuthInfoStoreFields, UserInfoStoreFields};
 use leptos::prelude::*;
-use reactive_stores::Store;
+
+use crate::data::context::auth::use_auth;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PermissionMatch {
@@ -49,10 +48,10 @@ pub fn PermissionGuard(
     /// Content to render if authorized
     children: ChildrenFn,
 ) -> impl IntoView {
-    let store = expect_context::<Store<AppStateContext>>();
+    let auth_ctx = use_auth();
 
     let is_authorized = Memo::new(move |_| {
-        let user_permissions = store.user().auth_info().current_role_permissions().get();
+        let user_permissions = auth_ctx.current_role_permissions.get();
 
         match match_mode {
             PermissionMatch::All => permissions.iter().all(|p| user_permissions.contains(p)),

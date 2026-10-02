@@ -3,60 +3,59 @@ name: Techie Tenka Frontend CI/CD
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
-
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
 
     steps:
-    - uses: actions/checkout@v6
-    # Download Tailwind CLI
-    - name: Download Tailwind CLI
-      run: |
-        curl -L -o tailwindcss https://github.com/tailwindlabs/tailwindcss/releases/download/v4.1.10/tailwindcss-linux-x64
-        chmod +x tailwindcss
-        ./tailwindcss -i styles/input.css -o styles/output.css --minify
-    - name: install toolchain
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        target: wasm32-unknown-unknown
-        override: true
-        profile: minimal
-    - name: Install trunk
-      uses: jetli/trunk-action@v0.5.1
-      with:
-        version: 'latest'
-    - name: Build
-      run: |
-        touch .env
-        echo "NEWSLETTER_MAILING_LIST_ID=${{ secrets.NEWSLETTER_MAILING_LIST_ID }}" >> .env
-        echo "FILES_SERVICE_API=${{ secrets.FILES_SERVICE_API }}" >> .env
-        echo "ACL_SERVICE_API=${{ secrets.ACL_SERVICE_API }}" >> .env
-        echo "SHARED_SERVICE_API=${{ secrets.SHARED_SERVICE_API }}" >> .env
-        echo "PAYMENTS_SERVICE_API=${{ secrets.PAYMENTS_SERVICE_API }}" >> .env
-        echo "EMAIL_SERVICE_API=${{ secrets.EMAIL_SERVICE_API }}" >> .env
-        echo "MARKETPLACE_WAITLIST_MAILING_LIST_ID=${{ secrets.MARKETPLACE_WAITLIST_MAILING_LIST_ID }}" >> .env
+      - uses: useblacksmith/checkout@v1
+      # Download Tailwind CLI
+      - name: Download Tailwind CLI
+        run: |
+          curl -L -o tailwindcss https://github.com/tailwindlabs/tailwindcss/releases/download/v4.1.10/tailwindcss-linux-x64
+          chmod +x tailwindcss
+          ./tailwindcss -i styles/input.css -o styles/output.css --minify
+      - name: install toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: wasm32-unknown-unknown
+          override: true
+          profile: minimal
+      - name: Install trunk
+        uses: jetli/trunk-action@v0.5.1
+        with:
+          version: "latest"
+      - name: Build
+        run: |
+          touch .env
+          echo "NEWSLETTER_MAILING_LIST_ID=${{ secrets.NEWSLETTER_MAILING_LIST_ID }}" >> .env
+          echo "FILES_SERVICE_API=${{ secrets.FILES_SERVICE_API }}" >> .env
+          echo "ACL_SERVICE_API=${{ secrets.ACL_SERVICE_API }}" >> .env
+          echo "SHARED_SERVICE_API=${{ secrets.SHARED_SERVICE_API }}" >> .env
+          echo "PAYMENTS_SERVICE_API=${{ secrets.PAYMENTS_SERVICE_API }}" >> .env
+          echo "EMAIL_SERVICE_API=${{ secrets.EMAIL_SERVICE_API }}" >> .env
+          echo "MARKETPLACE_WAITLIST_MAILING_LIST_ID=${{ secrets.MARKETPLACE_WAITLIST_MAILING_LIST_ID }}" >> .env
 
-        export $(cat .env | xargs) && trunk build --release
-    - name: 'Tar files'
-      run: tar -cvf dist.tar dist/
-    - name: Archive production artifacts
-      uses: actions/upload-artifact@v7
-      with:
-        name: dist
-        path: dist.tar
+          export $(cat .env | xargs) && trunk build --release
+      - name: "Tar files"
+        run: tar -cvf dist.tar dist/
+      - name: Archive production artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist.tar
 
   push_docker_image:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     strategy:
       fail-fast: false
       matrix:
@@ -64,56 +63,52 @@ jobs:
           - linux/amd64
           # - linux/arm64
     steps:
-    - name: Prepare
-      run: |
-        platform=${{ matrix.platform }}
-        echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
-        echo "FRONTEND_REGISTRY_IMAGE=registry.techietenka.com/tt-frontend" >> $GITHUB_ENV
+      - name: Prepare
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+          echo "FRONTEND_REGISTRY_IMAGE=registry.techietenka.com/tt-frontend" >> $GITHUB_ENV
 
-    - name: Docker meta
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.FRONTEND_REGISTRY_IMAGE }}
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.FRONTEND_REGISTRY_IMAGE }}
 
-    - uses: actions/checkout@v6
+      - uses: useblacksmith/checkout@v1
 
-    - name: Log in to Docker Registry
-      uses: docker/login-action@v3
-      with:
-        registry: registry.techietenka.com
-        username: ${{ secrets.REGISTRY_USERNAME }}
-        password: ${{ secrets.REGISTRY_PASSWORD }}
+      - name: Log in to Docker Registry
+        uses: docker/login-action@v3
+        with:
+          registry: registry.techietenka.com
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
 
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
-      with:
-        platforms: ${{ matrix.platform }}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: ${{ matrix.platform }}
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-      # with:
-      #   version: "lab:latest"
-      #   driver: cloud
-      #   endpoint: "elonaire/elonaire-builder"
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
 
-    - name: Download a single artifact
-      uses: actions/download-artifact@v8
-      with:
-        name: dist
-        path: .
-    - name: Unpack the artifact
-      run: tar -xvf dist.tar
+      - name: Download a single artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: .
+      - name: Unpack the artifact
+        run: tar -xvf dist.tar
 
-    - name: Debug dist
-      run: |
-        ls -la
-        ls -la dist
+      - name: Debug dist
+        run: |
+          ls -la
+          ls -la dist
 
-    - name: Build and push Docker image
-      id: build
-      uses: docker/build-push-action@v6
-      with:
+      - name: Build and push Docker image
+        id: build
+        uses: useblacksmith/build-push-action@v2
+        with:
           context: .
           # push: true
           tags: ${{ env.FRONTEND_REGISTRY_IMAGE }}
@@ -123,83 +118,86 @@ jobs:
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
 
-    - name: Export digest
-      run: |
-        mkdir -p ${{ runner.temp }}/digests
-        digest="${{ steps.build.outputs.digest }}"
-        touch "${{ runner.temp }}/digests/${digest#sha256:}"
+      - name: Export digest
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
 
-    - name: Upload digest
-      uses: actions/upload-artifact@v7
-      with:
-        name: digests-tt-frontend-${{ env.PLATFORM_PAIR }}
-        path: ${{ runner.temp }}/digests/*
-        if-no-files-found: error
-        retention-days: 1
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digests-tt-frontend-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
 
-    - name: Download digests
-      uses: actions/download-artifact@v8
-      with:
-        path: ${{ runner.temp }}/digests
-        pattern: digests-tt-frontend-*
-        merge-multiple: true
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-tt-frontend-*
+          merge-multiple: true
 
-    - name: Docker meta
-      id: meta-tag
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.FRONTEND_REGISTRY_IMAGE }}
-        tags: |
+      - name: Docker meta
+        id: meta-tag
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.FRONTEND_REGISTRY_IMAGE }}
+          tags: |
             type=raw,value=latest
 
-    - name: Create manifest list and push
-      working-directory: ${{ runner.temp }}/digests
-      run: |
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
           docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf '${{ env.FRONTEND_REGISTRY_IMAGE }}@sha256:%s ' *)
 
   deploy_to_server:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [push_docker_image]
     if: |
       always() && needs.push_docker_image.result != 'failure'
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: useblacksmith/checkout@v1
 
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
-            ssh-private-key: ${{ secrets.VM_SSH_KEY }}
+          ssh-private-key: ${{ secrets.VM_SSH_KEY }}
 
       - name: Add VM to known hosts
         run: ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
 
       - name: Copy manifests and configs
         run: |
-              scp -r k3s ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/home/${{ secrets.VM_USER }}/
-
+          scp -r k3s ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/home/${{ secrets.VM_USER }}/
 
       - name: Deploy on VM
         run: |
-              ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} <<'EOF'
-                    set -e
+          ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} <<'EOF'
+                set -e
 
-                    cd /home/${{ secrets.VM_USER }}
+                cd /home/${{ secrets.VM_USER }}
 
-                    # Make .sh scripts executable
-                    chmod +x k3s/configs.sh
+                # Make .sh scripts executable
+                chmod +x k3s/configs.sh
 
-                    # Run script(s)
-                    ./k3s/configs.sh
+                # Run script(s)
+                ./k3s/configs.sh
 
-                    # Apply manifests after scripts (if needed)
-                    kubectl apply -f ./k3s/manifests -R
-              EOF
+                # Apply manifests after scripts (if needed)
+                kubectl apply -f ./k3s/manifests -R
+          EOF
 
   automerge:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+
+    permissions:
+      contents: write
+      pull-requests: write
 
     needs: [build, push_docker_image, deploy_to_server]
     if: |
@@ -209,7 +207,7 @@ jobs:
     steps:
       - id: automerge
         name: automerge
-        uses: 'pascalgn/automerge-action@v0.16.4'
+        uses: "pascalgn/automerge-action@v0.16.4"
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          MERGE_LABELS: ''
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          MERGE_LABELS: ""

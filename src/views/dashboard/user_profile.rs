@@ -2,29 +2,23 @@ use detaxine_ui::{
     components::actions::button::BasicButton,
     utils::formatters::{Pipe, PipeOption},
 };
+use icondata::{BsCamera, BsPencil};
 use leptos::prelude::*;
 use leptos_icons::Icon;
-use reactive_stores::Store;
 
-use crate::data::{
-    context::store::{AppStateContext, AppStateContextStoreFields},
-    models::general::acl::UserInfoStoreFields,
-};
-use icondata::{BsCamera, BsPencil};
+use crate::data::context::{auth::use_auth, user::use_user};
 
 #[component]
 pub fn ProfilePage() -> impl IntoView {
-    let store = expect_context::<Store<AppStateContext>>();
-    // let user_profile = store.user().user_profile();
-    // let auth_status = store.user().auth_info();
+    let user_ctx = use_user();
+    let auth_ctx = use_auth();
 
     view! {
         <div class="min-h-svh flex flex-col gap-[40px] display-constraints">
-
             {
                 move || {
-                    let user = store.user().user_profile().get();
-                    let auth_status = store.user().auth_info().get();
+                    let user = user_ctx.user_profile.get();
+                    let current_role = auth_ctx.current_role.get();
                     view! {
                         // Avatar card
                         <div class="bg-white dark:bg-navy-light rounded-[5px] shadow-sm p-6 mb-4 flex items-center gap-5">
@@ -39,7 +33,7 @@ pub fn ProfilePage() -> impl IntoView {
                             </div>
                             <div>
                                 <h2 class="text-lg font-semibold">{user.full_name.text(None)}</h2>
-                                <p class="text-sm">{auth_status.current_role.text(None)}</p>
+                                <p class="text-sm">{current_role.text(None)}</p>
                                 <p class="text-sm">"Leeds, United Kingdom"</p>
                             </div>
                         </div>
@@ -106,7 +100,6 @@ pub fn ProfilePage() -> impl IntoView {
                     }
                 }
             }
-
         </div>
     }.into_any()
 }

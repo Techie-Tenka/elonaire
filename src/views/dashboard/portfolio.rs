@@ -17,42 +17,20 @@ use detaxine_ui::{
         },
         navigation::breadcrumbs::Breadcrumbs,
     },
-    utils::forms::{deserialize_form_data_with_options, get_form_data_from_form_ref},
+    utils::forms::get_form_data_from_form_ref,
 };
 use icondata::BsPlusLg;
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
-use leptos::task::spawn_local;
 use leptos::wasm_bindgen::JsCast;
 use leptos_meta::*;
 use leptos_router::components::{A, Outlet};
-use reactive_stores::Store;
-use web_sys::{FormData, HtmlFormElement, HtmlInputElement};
+use web_sys::{HtmlFormElement, HtmlInputElement};
 
-use crate::data::context::shared::fetch_portfolio;
-use crate::data::models::general::shared::RestResponse;
-use crate::data::models::graphql::shared::{
-    CreatePortfolioItemResponse, UserPortfolioCategory, UserPortfolioInputVars,
-};
 use crate::data::{
-    context::{
-        shared::fetch_skills,
-        store::{AppStateContext, AppStateContextStoreFields},
-    },
-    models::{
-        general::{
-            acl::{AuthInfoStoreFields, UserInfoStoreFields},
-            files::UploadedFileResponse,
-        },
-        graphql::shared::UserPortfolioInput,
-    },
+    context::portfolio::use_portfolio, models::graphql::shared::UserPortfolioCategory,
 };
 use crate::utils::custom_traits::EnumerableEnum;
-use crate::utils::errors::unwrap_rest_response;
-use crate::utils::graphql_client::perform_mutation_or_query_with_vars;
-
-const FILES_SERVICE_API: Option<&str> = option_env!("FILES_SERVICE_API");
-const SHARED_SERVICE_API: Option<&str> = option_env!("SHARED_SERVICE_API");
 
 #[component]
 pub fn Portfolio() -> impl IntoView {
@@ -66,9 +44,8 @@ pub fn Portfolio() -> impl IntoView {
 
 #[component]
 pub fn PortfolioList() -> impl IntoView {
-    let store = expect_context::<Store<AppStateContext>>();
-    let portfolio = move || store.portfolio();
-    let (is_loading, set_is_loading) = signal(false);
+    let portfolio_ctx = use_portfolio();
+    let portfolio = move || portfolio_ctx.portfolio;
 
     let table_data = RwSignal::new((
         vec![
@@ -80,6 +57,10 @@ pub fn PortfolioList() -> impl IntoView {
         vec![],
     ));
 
+    Effect::new(move |_| {
+        portfolio_ctx.fetch_portfolio();
+    });
+
     Effect::new(move || {
         let portfolio_data: Vec<HashMap<String, TableCellData>> = portfolio()
             .get()
@@ -87,8 +68,6 @@ pub fn PortfolioList() -> impl IntoView {
             .map(|portfolio| {
                 let mut hash_map_data = HashMap::new();
 
-                // This id is the unique identifier of the table row. and is a MUST for the table to function properly.
-                // *Note:* The id is a MUST for the table to function properly. You might be forced to generate a unique id for each row if your data does not have a unique identifier.
                 hash_map_data.insert(
                     "id".to_string(),
                     TableCellData::String(
@@ -99,7 +78,6 @@ pub fn PortfolioList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Title".to_string(),
                     TableCellData::String(
@@ -110,7 +88,6 @@ pub fn PortfolioList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "YOE".to_string(),
                     TableCellData::Usize(
@@ -121,7 +98,6 @@ pub fn PortfolioList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Start Date".to_string(),
                     TableCellData::DateTime(
@@ -132,7 +108,6 @@ pub fn PortfolioList() -> impl IntoView {
                             .to_owned(),
                     ),
                 );
-
                 hash_map_data.insert(
                     "Category".to_string(),
                     TableCellData::String(format!(
@@ -153,31 +128,13 @@ pub fn PortfolioList() -> impl IntoView {
         });
     });
 
-    Effect::new(move || {
-        set_is_loading.set(true);
-        spawn_local(async move {
-            // let mut headers = HashMap::new() as HashMap<String, String>;
-            // headers.insert(
-            //     "Authorization".into(),
-            //     format!(
-            //         "Bearer {}",
-            //         store.user().auth_info().token().get_untracked()
-            //     ),
-            // );
-
-            let _portfolio_res = fetch_portfolio(&store, None).await;
-
-            set_is_loading.set(false);
-        });
-    });
-
     view! {
         <>
             <Title text="My Portfolio"/>
             <div class="display-constraints">
                 <Breadcrumbs custom_route_names=["Home", "Dashboard", "Portfolio"] />
             </div>
-            <Show when=move || is_loading.get()>
+            <Show when=move || portfolio_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 
@@ -210,12 +167,11 @@ pub fn CreatePortfolio() -> impl IntoView {
     let (form_is_valid, set_form_is_valid) = signal(false);
     let submit_is_disabled =
         Memo::new(move |_| !form_is_valid.get() || applied_skills.get().is_empty());
-    let store = expect_context::<Store<AppStateContext>>();
-    let skills = move || store.skills();
+    let portfolio_ctx = use_portfolio();
+    let skills = move || portfolio_ctx.skills;
     let skills_select_options = RwSignal::new(vec![] as Vec<SelectOption>);
     let success_modal_is_open = RwSignal::new(false);
     let confirm_modal_is_open = RwSignal::new(false);
-    let (is_loading, set_is_loading) = signal(false);
 
     let portfolio_categories = RwSignal::new(
         UserPortfolioCategory::variants_slice()
@@ -224,212 +180,80 @@ pub fn CreatePortfolio() -> impl IntoView {
             .collect::<Vec<SelectOption>>(),
     );
 
-    let onprimary_handler = Callback::new(move |_| {
-        if form_is_valid.get() {
-            set_is_loading.set(true);
-            if let Some(file_input) = file_input_ref.to_owned().get() as Option<HtmlInputElement> {
-                if let Ok(files_form_data) = FormData::new() {
-                    if let Some(filelist) = file_input.files() {
-                        for i in 0..filelist.length() {
-                            if let Some(file) = filelist.item(i) {
-                                if let Err(e) = files_form_data.append_with_blob("file", &file) {
-                                    leptos::logging::error!("Failed to append Blob: {:?}", e);
-                                };
-                            }
-                        }
-                    }
-
-                    let Some(files_service_api) = FILES_SERVICE_API else {
-                        return;
-                    };
-
-                    spawn_local(async move {
-                        let Ok(request) = gloo_net::http::Request::post(&format!(
-                            "{files_service_api}/upload/default"
-                        ))
-                        .header(
-                            "Authorization",
-                            format!(
-                                "Bearer {}",
-                                store.user().auth_info().token().get_untracked()
-                            )
-                            .as_str(),
-                        )
-                        .body(files_form_data) else {
-                            set_is_loading.set(false);
-                            return;
-                        };
-
-                        let body = match request.send().await {
-                            Ok(r) => r,
-                            Err(err) => {
-                                leptos::logging::error!("Failed to upload files: {:?}", err);
-                                set_is_loading.set(false);
-                                return;
-                            }
-                        };
-
-                        let body =
-                            match body.json::<RestResponse<Vec<UploadedFileResponse>>>().await {
-                                Ok(b) => b,
-                                Err(err) => {
-                                    leptos::logging::error!(
-                                        "Failed to parse upload response: {:?}",
-                                        err
-                                    );
-                                    set_is_loading.set(false);
-                                    return;
-                                }
-                            };
-
-                        let Some(uploaded_files) = unwrap_rest_response(body, &store, None) else {
-                            set_is_loading.set(false);
-                            return;
-                        };
-
-                        let Some(form_data) = get_form_data_from_form_ref(&form_ref) else {
-                            set_is_loading.set(false);
-                            return;
-                        };
-
-                        let Some(files_service_api) = FILES_SERVICE_API else {
-                            return;
-                        };
-
-                        if let Err(e) = form_data.append_with_str(
-                            "thumbnail",
-                            format!(
-                                "{files_service_api}/view/default/{}",
-                                uploaded_files[0].original_filename
-                            )
-                            .as_str(),
-                        ) {
-                            leptos::logging::log!("Error appending thumbnail: {:?}", e);
-                            set_is_loading.set(false);
-                            return;
-                        }
-
-                        let Some(deserialized_form_data) = deserialize_form_data_with_options::<
-                            UserPortfolioInput,
-                        >(
-                            &form_data, &Default::default()
-                        ) else {
-                            set_is_loading.set(false);
-                            return;
-                        };
-
-                        let input_vars = UserPortfolioInputVars {
-                            portfolio_item: deserialized_form_data,
-                            skills: applied_skills.get_untracked(),
-                        };
-
-                        let query = r#"
-                            mutation CreatePortfolioItem($portfolioItem: UserPortfolioInput!, $skills: [String!]!) {
-                                createPortfolioItem(portfolioItem: $portfolioItem, skills: $skills) {
-                                    data {
-                                        id
-                                        title
-                                        description
-                                        link
-                                        startDate
-                                        category
-                                        thumbnail
-                                        skills {
-                                            id
-                                            thumbnail
-                                            name
-                                        }
-                                    }
-                                    metadata {
-                                        newAccessToken
-                                        requestId
-                                    }
-                                }
-                            }
-                        "#;
-
-                        let mut headers = HashMap::new() as HashMap<String, String>;
-                        headers.insert(
-                            "Authorization".into(),
-                            format!(
-                                "Bearer {}",
-                                store.user().auth_info().token().get_untracked()
-                            ),
-                        );
-
-                        let Some(shared_service_api) = SHARED_SERVICE_API else {
-                            return;
-                        };
-
-                        let response = perform_mutation_or_query_with_vars::<
-                            CreatePortfolioItemResponse,
-                            UserPortfolioInputVars,
-                        >(
-                            Some(&headers), shared_service_api, query, input_vars
-                        )
-                        .await;
-
-                        match response.get_data() {
-                            Some(_data) => {
-                                if let Some(form) = form_ref
-                                    .get_untracked()
-                                    .and_then(|el| el.dyn_into::<HtmlFormElement>().ok())
-                                {
-                                    form.reset();
-                                    set_form_is_valid.set(false);
-                                }
-                                set_is_loading.set(false);
-                                success_modal_is_open.update(|status| *status = true);
-                            }
-                            None => {
-                                set_is_loading.set(false);
-                            }
-                        }
-                    });
-                };
-            };
+    // React to successful creation.
+    Effect::new(move |prev: Option<u64>| {
+        let dirty = portfolio_ctx.portfolio_item_created_dirty.get();
+        if let Some(prev) = prev {
+            if dirty != prev {
+                if let Some(form) = form_ref
+                    .get_untracked()
+                    .and_then(|el: HtmlFormElement| el.dyn_into::<HtmlFormElement>().ok())
+                {
+                    form.reset();
+                    set_form_is_valid.set(false);
+                }
+                applied_skills.set(Vec::new());
+                success_modal_is_open.set(true);
+            }
         }
+        dirty
     });
 
-    // let onreset_handler = Callback::new(move |_ev: ev::Event| {
-    //     init_date.set(None);
-    // });
+    let onprimary_handler = Callback::new(move |_| {
+        if !form_is_valid.get() {
+            return;
+        }
 
-    Effect::new(move || {
-        let select_options = skills()
-            .get()
-            .iter()
-            .map(|skill| SelectOption {
-                value: skill.id.as_ref().unwrap_or(&Default::default()).clone(),
-                label: skill.name.as_ref().unwrap_or(&Default::default()).clone(),
-            })
-            .collect::<Vec<_>>();
+        let Some(file_input) = file_input_ref.get() as Option<HtmlInputElement> else {
+            return;
+        };
 
-        skills_select_options.set(select_options);
+        let mut files = Vec::new();
+        if let Some(list) = file_input.files() {
+            for i in 0..list.length() {
+                if let Some(file) = list.item(i) {
+                    files.push(file);
+                }
+            }
+        }
+
+        let Some(form_data) = get_form_data_from_form_ref(&form_ref) else {
+            return;
+        };
+
+        portfolio_ctx.create_portfolio_item(files, form_data, applied_skills.get_untracked());
     });
 
-    Effect::new(move || {
-        set_is_loading.set(true);
-        spawn_local(async move {
-            let _fetch_skills_res = fetch_skills(&store, None).await;
+    // Derive skill select options.
+    Effect::new(move |_| {
+        skills_select_options.set(
+            skills()
+                .get()
+                .iter()
+                .map(|skill| SelectOption {
+                    value: skill.id.as_ref().unwrap_or(&Default::default()).clone(),
+                    label: skill.name.as_ref().unwrap_or(&Default::default()).clone(),
+                })
+                .collect::<Vec<_>>(),
+        );
+    });
 
-            set_is_loading.set(false);
-        });
+    // Fetch skills for the dropdown on mount.
+    Effect::new(move |_| {
+        portfolio_ctx.fetch_skills();
     });
 
     let handle_step_form_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
         ev.stop_propagation();
 
-        // Implement logic to show form validity
-        let target = ev
+        if let Some(form) = ev
             .target()
-            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok());
-
-        if let Some(form) = target {
+            .and_then(|t| t.dyn_into::<HtmlFormElement>().ok())
+        {
             set_form_is_valid.set(form.check_validity());
 
-            if let Some(_submitter) = ev.submitter() {
+            if ev.submitter().is_some() {
                 confirm_modal_is_open.update(|status| *status = true);
             }
         }
@@ -448,7 +272,7 @@ pub fn CreatePortfolio() -> impl IntoView {
                     <p>"Are you sure that you want to submit?"</p>
                 </div>
             </BasicModal>
-            <Show when=move || is_loading.get()>
+            <Show when=move || portfolio_ctx.is_loading.get()>
                 <Spinner />
             </Show>
 
@@ -466,18 +290,18 @@ pub fn CreatePortfolio() -> impl IntoView {
                     <DatePicker label="End Date" required=true id_attr="end_date" name="end_date" />
                     <InputField field_type=InputFieldType::Text label="Link" required=true id_attr="link" name="link" />
                     <SelectInput
-                    label="Category"
-                    name="category"
-                    required=true
-                    id_attr="category"
-                    placeholder="Select Category"
-                    options=portfolio_categories
+                        label="Category"
+                        name="category"
+                        required=true
+                        id_attr="category"
+                        placeholder="Select Category"
+                        options=portfolio_categories
                     />
                     <CustomFileInput input_node_ref=file_input_ref label="Thumbnail" name="thumbnail" id_attr="thumbnail" accept="image/*" required=true />
                     <div class="flex flex-col gap-[10px]">
                         <h3>Applied Skills</h3>
                         <div class="flex flex-row items-center">
-                        <CustomSelectInput
+                            <CustomSelectInput
                                 label="Skills"
                                 id_attr="skills"
                                 multiple=true
