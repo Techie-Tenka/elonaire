@@ -1,12 +1,15 @@
 use detaxine_ui::components::navigation::tabs::{Tab, TabLabel, Tabs};
 use leptos::prelude::*;
+use leptos_icons::Icon;
 use leptos_meta::*;
+use leptos_router::components::A;
 
 use crate::components::molecules::flip_card::FlipCard;
 use crate::components::molecules::{headline::Headline, top_nav::TopNav};
 use crate::data::context::portfolio::use_portfolio;
 use crate::data::models::graphql::shared::{UserPortfolio, UserPortfolioCategory};
 use crate::utils::custom_traits::EnumerableEnum;
+use icondata::LuSquareArrowOutUpRight;
 
 #[component]
 pub fn Portfolio() -> impl IntoView {
@@ -107,22 +110,78 @@ pub fn Portfolio() -> impl IntoView {
                         <Tab slot>
                             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-[20px]">
                                 {
-                                    move || javascript_projects.get().iter().map(|project| {
-                                        view! {
-                                            <FlipCard title={project.title.as_ref().unwrap_or(&Default::default()).clone()} image_url={project.thumbnail.as_ref().unwrap_or(&Default::default()).clone()} description={project.description.as_ref().unwrap_or(&Default::default()).clone()} />
-                                        }
-                                    }).collect::<Vec<_>>()
+                                    move || {
+                                        javascript_projects.get().iter().map(|project| {
+                                            let cloned_link = project.link.clone().unwrap_or_default();
+
+                                            view! {
+                                                <FlipCard
+                                                    title={project.title.clone().unwrap_or_default()}
+                                                    image_url={project.thumbnail.clone().unwrap_or_default()}
+                                                    description={project.description.clone().unwrap_or_default()}
+                                                    actions=ViewFn::from(move || {
+                                                        let link = cloned_link.clone();
+
+                                                        view! {
+                                                            <A
+                                                                attr:class="flex items-center justify-center gap-[10px] py-2 px-4 cursor-pointer rounded-[5px] border-2 border-contrast-white text-contrast-white hover:bg-contrast-white hover:text-primary font-bold"
+                                                                href=link
+                                                                target="_blank"
+                                                            >
+                                                                <span>"View Project"</span>
+                                                                <span>
+                                                                    <Icon
+                                                                        width="24"
+                                                                        height="24"
+                                                                        icon=LuSquareArrowOutUpRight
+                                                                    />
+                                                                </span>
+                                                            </A>
+                                                        }
+                                                    })
+                                                />
+                                            }
+                                        }).collect::<Vec<_>>()
+                                    }
                                 }
                             </div>
                         </Tab>
                         <Tab slot>
                             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-[20px]">
                                 {
-                                    move || rust_projects.get().iter().map(|project| {
-                                        view! {
-                                            <FlipCard title={project.title.as_ref().unwrap_or(&Default::default()).clone()} image_url={project.thumbnail.as_ref().unwrap_or(&Default::default()).clone()} description={project.description.as_ref().unwrap_or(&Default::default()).clone()} />
-                                        }
-                                    }).collect::<Vec<_>>()
+                                    move || {
+                                        rust_projects.get().iter().map(|project| {
+                                            let cloned_link = project.link.clone().unwrap_or_default();
+
+                                            view! {
+                                                <FlipCard
+                                                    title={project.title.clone().unwrap_or_default()}
+                                                    image_url={project.thumbnail.clone().unwrap_or_default()}
+                                                    description={project.description.clone().unwrap_or_default()}
+                                                    actions=ViewFn::from(move || {
+                                                        let link = cloned_link.clone();
+
+                                                        view! {
+                                                            <A
+                                                                attr:class="flex items-center justify-center gap-[10px] py-2 px-4 cursor-pointer rounded-[5px] border-2 border-contrast-white text-contrast-white hover:bg-contrast-white hover:text-primary font-bold"
+                                                                href=link
+                                                                target="_blank"
+                                                            >
+                                                                <span>"View Project"</span>
+                                                                <span>
+                                                                    <Icon
+                                                                        width="24"
+                                                                        height="24"
+                                                                        icon=LuSquareArrowOutUpRight
+                                                                    />
+                                                                </span>
+                                                            </A>
+                                                        }
+                                                    })
+                                                />
+                                            }
+                                        }).collect::<Vec<_>>()
+                                    }
                                 }
                             </div>
                         </Tab>
@@ -130,8 +189,33 @@ pub fn Portfolio() -> impl IntoView {
                             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-[20px]">
                                 {
                                     move || database_projects.get().iter().map(|project| {
+                                        let cloned_link = project.link.clone().unwrap_or_default();
                                         view! {
-                                            <FlipCard title={project.title.as_ref().unwrap_or(&Default::default()).clone()} image_url={project.thumbnail.as_ref().unwrap_or(&Default::default()).clone()} description={project.description.as_ref().unwrap_or(&Default::default()).clone()} />
+                                            <FlipCard
+                                                title={project.title.clone().unwrap_or_default()}
+                                                image_url={project.thumbnail.clone().unwrap_or_default()}
+                                                description={project.description.clone().unwrap_or_default()}
+                                                actions=ViewFn::from(move || {
+                                                    let link = cloned_link.clone();
+
+                                                    view! {
+                                                        <A
+                                                            attr:class="flex items-center justify-center gap-[10px] py-2 px-4 cursor-pointer rounded-[5px] border-2 border-contrast-white text-contrast-white hover:bg-contrast-white hover:text-primary font-bold"
+                                                            href=link
+                                                            target="_blank"
+                                                        >
+                                                            <span>"View Project"</span>
+                                                            <span>
+                                                                <Icon
+                                                                    width="24"
+                                                                    height="24"
+                                                                    icon=LuSquareArrowOutUpRight
+                                                                />
+                                                            </span>
+                                                        </A>
+                                                    }
+                                                })
+                                            />
                                         }
                                     }).collect::<Vec<_>>()
                                 }
@@ -141,8 +225,33 @@ pub fn Portfolio() -> impl IntoView {
                             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-[20px]">
                                 {
                                     move || devops_projects.get().iter().map(|project| {
+                                        let cloned_link = project.link.clone().unwrap_or_default();
                                         view! {
-                                            <FlipCard title={project.title.as_ref().unwrap_or(&Default::default()).clone()} image_url={project.thumbnail.as_ref().unwrap_or(&Default::default()).clone()} description={project.description.as_ref().unwrap_or(&Default::default()).clone()} />
+                                            <FlipCard
+                                                title={project.title.clone().unwrap_or_default()}
+                                                image_url={project.thumbnail.clone().unwrap_or_default()}
+                                                description={project.description.clone().unwrap_or_default()}
+                                                actions=ViewFn::from(move || {
+                                                    let link = cloned_link.clone();
+
+                                                    view! {
+                                                        <A
+                                                            attr:class="flex items-center justify-center gap-[10px] py-2 px-4 cursor-pointer rounded-[5px] border-2 border-contrast-white text-contrast-white hover:bg-contrast-white hover:text-primary font-bold"
+                                                            href=link
+                                                            target="_blank"
+                                                        >
+                                                            <span>"View Project"</span>
+                                                            <span>
+                                                                <Icon
+                                                                    width="24"
+                                                                    height="24"
+                                                                    icon=LuSquareArrowOutUpRight
+                                                                />
+                                                            </span>
+                                                        </A>
+                                                    }
+                                                })
+                                            />
                                         }
                                     }).collect::<Vec<_>>()
                                 }
@@ -152,8 +261,33 @@ pub fn Portfolio() -> impl IntoView {
                             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-[20px]">
                                 {
                                     move || cloud_projects.get().iter().map(|project| {
+                                        let cloned_link = project.link.clone().unwrap_or_default();
                                         view! {
-                                            <FlipCard title={project.title.as_ref().unwrap_or(&Default::default()).clone()} image_url={project.thumbnail.as_ref().unwrap_or(&Default::default()).clone()} description={project.description.as_ref().unwrap_or(&Default::default()).clone()} />
+                                            <FlipCard
+                                                title={project.title.clone().unwrap_or_default()}
+                                                image_url={project.thumbnail.clone().unwrap_or_default()}
+                                                description={project.description.clone().unwrap_or_default()}
+                                                actions=ViewFn::from(move || {
+                                                    let link = cloned_link.clone();
+
+                                                    view! {
+                                                        <A
+                                                            attr:class="flex items-center justify-center gap-[10px] py-2 px-4 cursor-pointer rounded-[5px] border-2 border-contrast-white text-contrast-white hover:bg-contrast-white hover:text-primary font-bold"
+                                                            href=link
+                                                            target="_blank"
+                                                        >
+                                                            <span>"View Project"</span>
+                                                            <span>
+                                                                <Icon
+                                                                    width="24"
+                                                                    height="24"
+                                                                    icon=LuSquareArrowOutUpRight
+                                                                />
+                                                            </span>
+                                                        </A>
+                                                    }
+                                                })
+                                            />
                                         }
                                     }).collect::<Vec<_>>()
                                 }
@@ -163,8 +297,33 @@ pub fn Portfolio() -> impl IntoView {
                             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-[20px]">
                                 {
                                     move || mobile_projects.get().iter().map(|project| {
+                                        let cloned_link = project.link.clone().unwrap_or_default();
                                         view! {
-                                            <FlipCard title={project.title.as_ref().unwrap_or(&Default::default()).clone()} image_url={project.thumbnail.as_ref().unwrap_or(&Default::default()).clone()} description={project.description.as_ref().unwrap_or(&Default::default()).clone()} />
+                                            <FlipCard
+                                                title={project.title.clone().unwrap_or_default()}
+                                                image_url={project.thumbnail.clone().unwrap_or_default()}
+                                                description={project.description.clone().unwrap_or_default()}
+                                                actions=ViewFn::from(move || {
+                                                    let link = cloned_link.clone();
+
+                                                    view! {
+                                                        <A
+                                                            attr:class="flex items-center justify-center gap-[10px] py-2 px-4 cursor-pointer rounded-[5px] border-2 border-contrast-white text-contrast-white hover:bg-contrast-white hover:text-primary font-bold"
+                                                            href=link
+                                                            target="_blank"
+                                                        >
+                                                            <span>"View Project"</span>
+                                                            <span>
+                                                                <Icon
+                                                                    width="24"
+                                                                    height="24"
+                                                                    icon=LuSquareArrowOutUpRight
+                                                                />
+                                                            </span>
+                                                        </A>
+                                                    }
+                                                })
+                                            />
                                         }
                                     }).collect::<Vec<_>>()
                                 }
